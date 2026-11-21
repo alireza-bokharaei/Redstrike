@@ -10,6 +10,7 @@ import asyncio
 import datetime as dt
 import ipaddress
 import json
+import os
 import shutil
 import socket
 import ssl
@@ -19,9 +20,11 @@ from typing import Any
 
 import httpx
 
+from mcp_server.catalog import CATALOG, get_entry
 from mcp_server.tools import (
     SECURITY_HEADERS_OF_INTEREST,
     ToolParamValidationError,
+    validate_catalog_tool_params,
     validate_target_token,
     validate_tool_params,
 )
@@ -49,9 +52,18 @@ class ToolExecutionResult:
 class MCPToolExecutor:
     """Executes policy-approved tools with timeout, semaphore, and output isolation."""
 
-    def __init__(self, max_concurrent: int = 4, max_output_bytes: int = 65536) -> None:
+    def __init__(
+        self,
+        max_concurrent: int = 4,
+        max_output_bytes: int = 65536,
+        artifact_root: str | None = None,
+    ) -> None:
         self._semaphore = asyncio.Semaphore(max_concurrent)
         self._max_output_bytes = max_output_bytes
+        # Binary tooling reads files the operator already has. The root is explicit
+        # so "vuln.elf" means the same file to the Gateway, the MCP service and the
+        # executor, instead of whatever the process cwd happens to be.
+        self._artifact_root = artifact_root or os.environ.get("REDGATE_ARTIFACT_DIR", "")
 
     def _truncate(self, text: str) -> str:
         encoded = text.encode("utf-8", errors="replace")
@@ -70,7 +82,12 @@ class MCPToolExecutor:
     ) -> ToolExecutionResult:
         """Validate target + params, acquire semaphore, run tool, and bound output."""
         clean_target = validate_target_token(target)
-        clean_params = validate_tool_params(tool_name, params, allowed_params_policy)
+        if tool_name in CATALOG:
+            clean_params = validate_catalog_tool_params(
+                tool_name, {**params, "target": clean_target}, allowed_params_policy or {}
+            )
+        else:
+            clean_params = validate_tool_params(tool_name, params, allowed_params_policy)
         bounded_timeout = max(1, min(int(timeout_sec), 300))
 
         started_at = dt.datetime.now(dt.timezone.utc).isoformat()
@@ -140,6 +157,8 @@ class MCPToolExecutor:
             return await self._run_nmap(target, params, timeout_sec, pinned_ips)
         if tool_name in {"nmap_aggressive", "sqlmap", "hydra", "john"}:
             return await self._run_external_gated_binary(tool_name, target, params, timeout_sec)
+        if tool_name in CATALOG:
+            return await self._run_catalog_tool(tool_name, target, params, timeout_sec, pinned_ips)
         raise ToolParamValidationError(f"Unsupported tool '{tool_name}'.")
 
     async def _run_http_headers(
@@ -332,16 +351,135 @@ class MCPToolExecutor:
         self, tool_name: str, target: str, params: dict[str, Any], timeout_sec: int
     ) -> tuple[int, str, str]:
         bin_name = "nmap" if tool_name == "nmap_aggressive" else tool_name
-        resolved = shutil.which(bin_name)
         flags: list[str] = params.get("flags", [])
+        entry = get_entry(bin_name)
+        resolved = shutil.which(entry.binary if entry else bin_name)
         if not resolved:
             return (
                 127,
                 json.dumps({"tool": tool_name, "validated_flags": flags, "target": target}, indent=2),
-                f"Binary '{bin_name}' is intentionally omitted from default image.",
+                f"Binary '{bin_name}' is not installed on this runner image.",
             )
         argv = [resolved, *flags, "--", target]
         return await self._run_subprocess(argv, timeout_sec)
+
+    async def _run_catalog_tool(
+        self,
+        tool_name: str,
+        target: str,
+        params: dict[str, Any],
+        timeout_sec: int,
+        pinned_ips: list[str],
+    ) -> tuple[int, str, str]:
+        """Execute a catalogued tool with the pre-validated argv vector.
+
+        ``params["argv"]`` was produced by :func:`mcp_server.catalog.build_argv`
+        during validation, so the flag surface has already been checked against
+        the policy row. Two things are re-asserted here because they are
+        execution-boundary guarantees, not parameter hygiene:
+
+        * the resolved binary must be the catalogued one (no PATH shadowing of
+          e.g. ``nmap`` by a planted script);
+        * a network tool must receive the pinned IP, never a re-resolved name, so
+          DNS rebinding cannot redirect an in-flight run.
+        """
+        entry = get_entry(tool_name)
+        assert entry is not None  # dispatch only routes catalog tools here
+        argv = list(params.get("argv") or [])
+        if not argv:
+            raise ToolParamValidationError(f"No validated argv was produced for '{tool_name}'.")
+
+        resolved = shutil.which(entry.binary)
+        if not resolved:
+            return (
+                127,
+                json.dumps(
+                    {
+                        "tool": tool_name,
+                        "binary": entry.binary,
+                        "validated_argv": argv,
+                        "target": target,
+                        "installed_tools": self._installed_tools(),
+                    },
+                    indent=2,
+                ),
+                (
+                    f"Binary '{entry.binary}' is not installed on this runner image. "
+                    "argv was validated but nothing was executed."
+                ),
+            )
+        argv[0] = resolved
+
+        if entry.offline and entry.category != "binary":
+            raise ToolParamValidationError(f"'{tool_name}' is offline-only and takes no target.")
+
+        from mcp_server.catalog import takes_artifact
+
+        if takes_artifact(entry):
+            return await self._run_artifact_tool(tool_name, entry.binary, target, argv, timeout_sec)
+
+        if not entry.offline and pinned_ips:
+            pinned = pinned_ips[0]
+            for idx in range(len(argv) - 1, -1, -1):
+                if argv[idx] == target:
+                    argv[idx] = pinned
+                    break
+            else:
+                if target in argv:
+                    argv = [pinned if a == target else a for a in argv]
+
+        return await self._run_subprocess(argv, timeout_sec)
+
+    @staticmethod
+    def _installed_tools() -> dict[str, str]:
+        """Which catalog binaries actually exist on this image (honest reporting)."""
+        from mcp_server.catalog import is_path_binary
+
+        found: dict[str, str] = {}
+        for name, entry in CATALOG.items():
+            if not is_path_binary(entry):
+                continue
+            path = shutil.which(entry.binary)
+            if path:
+                found[name] = path
+        return found
+
+    async def _run_artifact_tool(
+        self,
+        tool_name: str,
+        binary: str,
+        target: str,
+        argv: list[str],
+        timeout_sec: int,
+    ) -> tuple[int, str, str]:
+        """Run a binary-tooling command against a file inside the artifact root.
+
+        The operator supplies a *name*, never a path. Resolution happens here so
+        the containment check is a real containment check (``resolve()`` first,
+        then compare parents), not a string-prefix guess.
+        """
+        from pathlib import Path
+
+        if not self._artifact_root:
+            raise ToolParamValidationError(
+                "Binary tooling needs REDGATE_ARTIFACT_DIR; no artifact root is configured."
+            )
+        if "/" in target or "\\" in target or target in {".", ".."}:
+            raise ToolParamValidationError(
+                f"'{tool_name}' takes an artifact name inside the configured root, not a path."
+            )
+        root = Path(self._artifact_root).resolve()
+        candidate = (root / target).resolve()
+        if candidate != root and root not in candidate.parents:
+            raise ToolParamValidationError("Artifact path escapes the configured root.")
+        if not candidate.is_file():
+            return (
+                127,
+                json.dumps({"artifact": target, "artifact_root": str(root)}, indent=2),
+                f"Artifact '{target}' was not found in the configured root.",
+            )
+        rewritten = [str(candidate) if a == target else a for a in argv]
+        return await self._run_subprocess(rewritten, timeout_sec)
 
     async def _run_subprocess(self, argv: list[str], timeout_sec: int) -> tuple[int, str, str]:
         safe_env = {"PATH": "/usr/local/bin:/usr/bin:/bin", "LANG": "C.UTF-8"}

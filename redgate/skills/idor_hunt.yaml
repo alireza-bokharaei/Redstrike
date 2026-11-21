@@ -1,0 +1,38 @@
+# IDOR / BOLA Hunting Playbook
+#
+# Provenance: written for this repository. The referenced upstream catalogue
+# (alireza-bokharaei/pentest-agents) carries no licence, so no markdown, prompt or
+# data file from it is copied here. What is shared is the *workflow shape*: a named
+# hypothesis, a bounded set of observable checks, and a stated refutation.
+#
+# Scope: every step below is one of the autonomous, in-tree tools
+# (tcp_port_probe, http_headers, tls_inspect). Nothing here can call nmap, sqlmap or any approval-gated tool,
+# expand scope, raise a budget or confirm a finding.
+
+id: idor-hunt
+name: IDOR / BOLA Hunting Playbook
+version: '1.0'
+category: web_hunting
+description: Object-level authorisation with two accounts and one shared object; the only acceptable evidence
+  is two authenticated responses for the same identifier.
+max_steps: 2
+expand_wildcard_subdomains: false
+steps:
+- stage: port_reachability
+  tool: tcp_port_probe
+  params:
+    ports:
+    - 80
+    - 443
+    - 8080
+    - 8443
+  rationale: Confirm the API listener.
+- stage: header_posture
+  tool: http_headers
+  params:
+    method: GET
+  rationale: Record the authentication scheme in use (cookie, bearer, mTLS).
+prioritization_rules:
+  missing_hsts_severity: medium
+report_focus: Refute when the second account receives the same 403/404 an unauthenticated caller receives.
+  A sequential identifier is not IDOR; unauthorised access to it is.

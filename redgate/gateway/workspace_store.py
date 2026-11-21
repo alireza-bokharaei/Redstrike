@@ -124,6 +124,13 @@ class WorkspaceStore:
         item["skill_snapshot"] = json.loads(item.pop("skill_snapshot_json"))
         item["http"] = json.loads(item.pop("http_json"))
         item["capture_evidence"] = bool(item["capture_evidence"])
+        # 2.2 columns are nullable on legacy rows; normalise for every reader.
+        item.setdefault("mode_id", None)
+        raw_ceiling = item.pop("mode_ceiling_json", None) or "{}"
+        try:
+            item["mode_ceiling"] = json.loads(raw_ceiling) if raw_ceiling else {}
+        except ValueError:
+            item["mode_ceiling"] = {}
         return item
 
     def get_mission(self, mission_id: str) -> dict[str, Any] | None:
@@ -500,3 +507,337 @@ class WorkspaceStore:
                 (finding_id,),
             ).fetchall()
         return [dict(r) for r in rows]
+
+    # ------------------------------------------------------------------
+    # 2.2 — Mode binding, deep TLS records, expansion requests, gate results
+    # ------------------------------------------------------------------
+
+    def bind_mode(self, mission_id: str, mode_id: str, ceiling: dict[str, Any]) -> None:
+        """Attach an operational mode + frozen ceiling to a mission row."""
+        with self.db.transaction() as conn:
+            conn.execute(
+                "UPDATE missions SET mode_id=?, mode_ceiling_json=?, updated_at=? "
+                "WHERE mission_id=?",
+                (mode_id, canonical_json(ceiling), utc_now_iso(), mission_id),
+            )
+
+    @staticmethod
+    def get_tls_audit(self, audit_id: str) -> dict[str, Any] | None:
+        with self.db.connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM tls_audits WHERE audit_id=?", (audit_id,)
+            ).fetchone()
+        return self._tls_audit(row) if row else None
+
+    def list_tls_audits(
+        self,
+        engagement_id: str,
+        *,
+        mission_id: str | None = None,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        where, args = ["engagement_id=?"], [engagement_id]
+        if mission_id is not None:
+            where.append("mission_id=?")
+            args.append(mission_id)
+        with self.db.connection() as conn:
+            rows = conn.execute(
+                f"SELECT * FROM tls_audits WHERE {' AND '.join(where)} "
+                "ORDER BY created_at DESC, audit_id LIMIT ? OFFSET ?",
+                [*args, max(1, min(limit, 100)), max(0, offset)],
+            ).fetchall()
+        return [self._tls_audit(r) for r in rows]
+
+    @staticmethod
+    def _tls_audit(row: sqlite3.Row) -> dict[str, Any]:
+        item = dict(row)
+        item["payload"] = json.loads(item.pop("payload_json"))
+        return item
+
+    def save_expansion_request(
+        self,
+        *,
+        engagement_id: str,
+        mission_id: str | None,
+        kind: str,
+        requested_by: str,
+        approval_id: str,
+        roe_clause: str,
+        justification: str,
+        payload: dict[str, Any],
+        ttl_seconds: int,
+    ) -> dict[str, Any]:
+        expansion_id = new_id("xpn")
+        now = dt.datetime.now(dt.timezone.utc)
+        with self.db.transaction() as conn:
+            conn.execute(
+                """INSERT INTO expansion_requests
+                   (expansion_id, engagement_id, mission_id, kind, requested_by, approval_id,
+                    roe_clause, justification, payload_json, status, expires_at, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)""",
+                (
+                    expansion_id,
+                    engagement_id,
+                    mission_id,
+                    kind,
+                    requested_by,
+                    approval_id,
+                    roe_clause,
+                    justification,
+                    canonical_json(payload),
+                    (now + dt.timedelta(seconds=max(60, int(ttl_seconds)))).isoformat(),
+                    now.isoformat(),
+                ),
+            )
+        return self.get_expansion_request(expansion_id) or {}
+
+    def get_expansion_request(self, expansion_id: str) -> dict[str, Any] | None:
+        with self.db.connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM expansion_requests WHERE expansion_id=?", (expansion_id,)
+            ).fetchone()
+        return self._expansion(row) if row else None
+
+    def list_expansion_requests(
+        self,
+        *,
+        engagement_id: str | None = None,
+        mission_id: str | None = None,
+        status: str | None = None,
+        limit: int = 30,
+    ) -> list[dict[str, Any]]:
+        where, args = [], []
+        for column, value in (
+            ("engagement_id", engagement_id),
+            ("mission_id", mission_id),
+            ("status", status),
+        ):
+            if value is not None:
+                where.append(f"{column}=?")
+                args.append(value)
+        clause = f"WHERE {' AND '.join(where)}" if where else ""
+        with self.db.connection() as conn:
+            rows = conn.execute(
+                f"SELECT * FROM expansion_requests {clause} "
+                "ORDER BY created_at DESC, expansion_id LIMIT ?",
+                [*args, max(1, min(limit, 200))],
+            ).fetchall()
+        return [self._expansion(r) for r in rows]
+
+    def finish_expansion(
+        self,
+        expansion_id: str,
+        status: str,
+        *,
+        note: str = "",
+        applied: dict[str, Any] | None = None,
+        decided_by: str | None = None,
+    ) -> dict[str, Any]:
+        if status not in {"approved", "rejected", "expired", "withdrawn"}:
+            raise ValueError("Invalid expansion terminal status.")
+        with self.db.transaction() as conn:
+            row = conn.execute(
+                "SELECT status FROM expansion_requests WHERE expansion_id=?", (expansion_id,)
+            ).fetchone()
+            if not row:
+                raise KeyError("Expansion request not found.")
+            if row["status"] in {"approved", "rejected", "expired", "withdrawn"}:
+                raise WorkspaceConflict(f"Expansion request is already {row['status']}.")
+            conn.execute(
+                "UPDATE expansion_requests SET status=?, applied_json=?, decided_by=?, "
+                "decided_at=?, note=? WHERE expansion_id=?",
+                (
+                    status,
+                    canonical_json(applied or {}),
+                    decided_by,
+                    utc_now_iso(),
+                    note[:500],
+                    expansion_id,
+                ),
+            )
+        return self.get_expansion_request(expansion_id) or {}
+
+    @staticmethod
+    def _expansion(row: sqlite3.Row) -> dict[str, Any]:
+        item = dict(row)
+        item["payload"] = json.loads(item.pop("payload_json"))
+        item["applied"] = json.loads(item.pop("applied_json", "{}") or "{}")
+        return item
+
+    def add_expansion_intents(self, mission_id: str, hosts: list[str]) -> int:
+        """Append approved hosts as new pending intents (never replays old ones)."""
+        if not hosts:
+            return 0
+        now = utc_now_iso()
+        with self.db.transaction() as conn:
+            mission = conn.execute(
+                "SELECT engagement_id FROM missions WHERE mission_id=?", (mission_id,)
+            ).fetchone()
+            if not mission:
+                raise KeyError("Mission not found.")
+            position = conn.execute(
+                "SELECT COALESCE(MAX(position) + 1, 0) AS nxt FROM mission_intents WHERE mission_id=?",
+                (mission_id,),
+            ).fetchone()["nxt"]
+            added = 0
+            for offset, host in enumerate(hosts):
+                asset_id = self._asset(
+                    conn, mission["engagement_id"], self.host_kind(host), host, host
+                )
+                existing = conn.execute(
+                    "SELECT 1 FROM mission_intents WHERE mission_id=? AND target=?",
+                    (mission_id, host),
+                ).fetchone()
+                if existing:
+                    continue
+                conn.execute(
+                    "INSERT INTO mission_intents (intent_id, mission_id, asset_id, position, target) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (new_id("int"), mission_id, asset_id, int(position) + offset, host),
+                )
+                added += 1
+            conn.execute(
+                "UPDATE missions SET updated_at=? WHERE mission_id=?", (now, mission_id)
+            )
+        return added
+
+    def raise_mission_budget(
+        self, mission_id: str, *, action_increase: int, seconds_increase: int
+    ) -> dict[str, Any]:
+        """Extend a live mission's budget and shift its deadline by the same delta.
+
+        The absolute deadline is *extended*, never reset: a paused mission does
+        not gain free time, and finished missions cannot be revived.
+        """
+        action_increase, seconds_increase = max(0, int(action_increase)), max(0, int(seconds_increase))
+        with self.db.transaction() as conn:
+            row = conn.execute(
+                "SELECT * FROM missions WHERE mission_id=?", (mission_id,)
+            ).fetchone()
+            if not row:
+                raise KeyError("Mission not found.")
+            if row["status"] in TERMINAL_STATES:
+                raise WorkspaceConflict("A terminal mission cannot receive more budget.")
+            new_actions = int(row["max_actions"]) + action_increase
+            new_seconds = int(row["max_seconds"]) + seconds_increase
+            if new_actions > 128:
+                raise MissionBudgetExceeded("Total action ceiling would exceed 128.")
+            deadline = row["deadline_at"]
+            if deadline is None and seconds_increase:
+                base = dt.datetime.now(dt.timezone.utc)
+                deadline = (base + dt.timedelta(seconds=new_seconds)).isoformat()
+            elif deadline is not None and seconds_increase:
+                deadline = (
+                    dt.datetime.fromisoformat(deadline) + dt.timedelta(seconds=seconds_increase)
+                ).isoformat()
+            conn.execute(
+                "UPDATE missions SET max_actions=?, max_seconds=?, deadline_at=?, updated_at=? "
+                "WHERE mission_id=?",
+                (new_actions, new_seconds, deadline, utc_now_iso(), mission_id),
+            )
+        return {
+            "mission_id": mission_id,
+            "max_actions_before": int(row["max_actions"]),
+            "max_actions_after": new_actions,
+            "max_seconds_before": int(row["max_seconds"]),
+            "max_seconds_after": new_seconds,
+            "deadline_at": deadline,
+        }
+
+    def save_gate_results(
+        self,
+        *,
+        engagement_id: str,
+        mission_id: str | None,
+        target: str,
+        results: list[dict[str, Any]],
+    ) -> int:
+        """Append evidence-gate verdicts (append-only; never updated)."""
+        if not results:
+            return 0
+        now = utc_now_iso()
+        with self.db.transaction() as conn:
+            for result in results:
+                conn.execute(
+                    """INSERT INTO evidence_gate_results
+                       (gate_id, engagement_id, mission_id, finding_key, target, status,
+                        payload_json, created_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        new_id("gat"),
+                        engagement_id,
+                        mission_id,
+                        str(result.get("finding_key", "")),
+                        target,
+                        str(result.get("status", "candidate")),
+                        canonical_json(result),
+                        now,
+                    ),
+                )
+        return len(results)
+
+    def list_gate_results(
+        self, engagement_id: str, *, mission_id: str | None = None, limit: int = 50
+    ) -> list[dict[str, Any]]:
+        where, args = ["engagement_id=?"], [engagement_id]
+        if mission_id is not None:
+            where.append("mission_id=?")
+            args.append(mission_id)
+        with self.db.connection() as conn:
+            rows = conn.execute(
+                f"SELECT * FROM evidence_gate_results WHERE {' AND '.join(where)} "
+                "ORDER BY created_at DESC, gate_id LIMIT ?",
+                [*args, max(1, min(limit, 200))],
+            ).fetchall()
+        out = []
+        for row in rows:
+            item = dict(row)
+            item["payload"] = json.loads(item.pop("payload_json"))
+            out.append(item)
+        return out
+
+    def save_tls_audit(
+        self,
+        *,
+        engagement_id: str,
+        target: str,
+        port: int,
+        requested_by: str,
+        mission_id: str | None,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Persist an immutable, hashed deep-TLS audit record."""
+        audit_id = new_id("tls")
+        body = canonical_json(payload)
+        digest = hashlib.sha256(body.encode("utf-8")).hexdigest()
+        now = utc_now_iso()
+        with self.db.transaction() as conn:
+            conn.execute(
+                """INSERT INTO tls_audits
+                   (audit_id, engagement_id, mission_id, target, port, requested_by,
+                    payload_json, sha256, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    audit_id,
+                    engagement_id,
+                    mission_id,
+                    target,
+                    int(port),
+                    requested_by,
+                    body,
+                    digest,
+                    now,
+                ),
+            )
+        return {
+            "audit_id": audit_id,
+            "engagement_id": engagement_id,
+            "mission_id": mission_id,
+            "target": target,
+            "port": int(port),
+            "requested_by": requested_by,
+            "sha256": digest,
+            "created_at": now,
+            "payload": payload,
+        }

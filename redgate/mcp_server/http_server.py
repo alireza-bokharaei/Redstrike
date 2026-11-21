@@ -17,7 +17,12 @@ from fastapi.responses import JSONResponse
 
 from mcp_server import __version__
 from mcp_server.executor import MCPToolExecutor
-from mcp_server.tools import MCP_TOOL_CATALOG, ToolParamValidationError
+from mcp_server.catalog import catalog_size, category_counts
+from mcp_server.tools import (
+    CATALOG_TOOL_INPUT_SCHEMA,
+    MCP_TOOL_CATALOG,
+    ToolParamValidationError,
+)
 
 logger = logging.getLogger("redgate.mcp")
 
@@ -25,7 +30,11 @@ INTERNAL_TOKEN = os.environ.get("REDGATE_INTERNAL_TOKEN", "")
 MAX_CONCURRENT = int(os.environ.get("REDGATE_MCP_MAX_CONCURRENT", "4"))
 MAX_OUTPUT_BYTES = int(os.environ.get("REDGATE_MCP_MAX_OUTPUT_BYTES", "65536"))
 
-executor = MCPToolExecutor(max_concurrent=MAX_CONCURRENT, max_output_bytes=MAX_OUTPUT_BYTES)
+executor = MCPToolExecutor(
+    max_concurrent=MAX_CONCURRENT,
+    max_output_bytes=MAX_OUTPUT_BYTES,
+    artifact_root=os.environ.get("REDGATE_ARTIFACT_DIR", ""),
+)
 
 app = FastAPI(
     title="Redstrike Layer 2 — MCP Tool Server",
@@ -50,6 +59,8 @@ async def health() -> dict[str, Any]:
         "version": __version__,
         "protocol": "MCP/2024-11-05",
         "registered_tools": list(MCP_TOOL_CATALOG.keys()),
+        "catalog_size": catalog_size(),
+        "catalog_categories": category_counts(),
         "max_concurrent": MAX_CONCURRENT,
     }
 
@@ -88,6 +99,20 @@ async def mcp_rpc(
             }
             for t in MCP_TOOL_CATALOG.values()
         ]
+        # The extended surface is published as one grouped tool so the protocol
+        # stays readable: clients see ``redstrike_tool`` plus the catalog listing
+        # it can call through (see /api/v1/offensive/tools on the Gateway).
+        tools_payload.append(
+            {
+                "name": "redstrike_tool",
+                "description": (
+                    f"Run any of the {catalog_size()} catalogued offensive tools. The flag "
+                    "surface of each tool is governed by the engagement's policy row; argv is "
+                    "built as an argument vector and the target must already be scope-validated."
+                ),
+                "inputSchema": CATALOG_TOOL_INPUT_SCHEMA,
+            }
+        )
         return JSONResponse({"jsonrpc": "2.0", "id": rpc_id, "result": {"tools": tools_payload}})
 
     if method == "tools/call":

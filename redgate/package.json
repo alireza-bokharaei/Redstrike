@@ -1,6 +1,6 @@
 {
   "name": "redstrike-tooling",
-  "version": "2.1.0",
+  "version": "2.3.1",
   "private": true,
   "description": "Pinned JavaScript validators and local console regression tests",
   "engines": { "node": ">=22.13.0" },

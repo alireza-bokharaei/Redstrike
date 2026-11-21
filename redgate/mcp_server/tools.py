@@ -1,11 +1,17 @@
-"""MCP tool schemas and strict parameter whitelist validators.
+"""MCP tool schemas and parameter governance for Layer 2.
 
 Every tool exposed by Layer 2 enforces:
-1. Target syntax normalization (no whitespace, shell metacharacters, or option injection).
-2. Explicit parameter whitelist checked against both hardcoded safety invariants
-   and runtime policy from config/tool_policy.yaml.
-3. Permanent code-level blocklists for destructive/shell flags (e.g., sqlmap --os-shell,
-   nmap -T4/-T5/--script) that cannot be bypassed even by editing YAML config.
+
+1. Target syntax normalisation (no whitespace, shell metacharacters, or option
+   injection).
+2. An explicit parameter whitelist. As of 2.3 the flag surface of a tool is a
+   *policy* question answered by ``config/policies.yaml`` plus the engagement
+   posture, not a hardcoded ban list: an engagement may allow ``nmap -T4`` (via
+   ``tool:nmap_aggressive`` and operator consent) or keep it refused.
+3. A code-level refusal floor that no configuration edit can lift: flags that
+   turn a check into a compromise (``sqlmap --os-shell`` and friends) stay
+   refused through :data:`mcp_server.catalog.BASELINE_REFUSED_FLAGS`. The floor
+   is intentionally narrow — it is about capability, not about noise or speed.
 """
 
 from __future__ import annotations
@@ -14,52 +20,37 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-# Hard safety invariants that CANNOT be overridden by configuration.
-PERMANENTLY_BANNED_SQLMAP_FLAGS: frozenset[str] = frozenset(
-    {
-        "--os-shell",
-        "--os-pwn",
-        "--os-cmd",
-        "--os-smbrelay",
-        "--os-bof",
-        "--priv-esc",
-        "--sql-shell",
-        "--sql-query",
-        "--file-write",
-        "--file-read",
-        "--file-dest",
-        "--udf-inject",
-    }
+# ---------------------------------------------------------------------------
+# Refusal floor.
+#
+# The authoritative refusal sets now live beside the catalog so that the argv
+# builder, the validators and the executor all consult one source. These aliases
+# stay for callers that imported them before 2.3; they are derived, never
+# hand-maintained, so they cannot drift from the builder's behaviour.
+# ---------------------------------------------------------------------------
+from mcp_server.catalog import (  # noqa: E402 - keeps the alias block readable
+    BASELINE_REFUSED_FLAGS,
+    ArgvBuildError,
+    build_argv,
 )
 
+PERMANENTLY_BANNED_SQLMAP_FLAGS: frozenset[str] = frozenset(
+    BASELINE_REFUSED_FLAGS["sqlmap"]
+)
+
+#: Nmap flags that remain refused in every posture. Timing (``-T4``) is NOT here:
+#: it is governed by the ``tool:nmap_aggressive`` policy row and operator
+#: consent, because speed is a noise question, not a capability question.
 PERMANENTLY_BANNED_NMAP_FLAGS: frozenset[str] = frozenset(
-    {
-        "-T4",
-        "-T5",
-        "-A",
-        "--script",
-        "--script-args",
-        "--datadir",
-        "-iL",
-        "-iR",
-        "-oN",
-        "-oX",
-        "-oG",
-        "-oA",
-        "-oS",
-        "--interactive",
-        "--resume",
-        "-D",
-        "-S",
-        "-f",
-        "--mtu",
-        "--spoof-mac",
-        "--data",
-        "--data-string",
-    }
+    {"--script", "--script-args", "--datadir", "-iL", "-iR", "--interactive", "--resume",
+     "-D", "-S", "--spoof-mac", "--data", "--data-string"}
 )
 
 SAFE_TARGET_RE = re.compile(r"^[A-Za-z0-9.\-:]{1,253}$")
+SAFE_URL_TARGET_RE = re.compile(
+    r"^https?://[A-Za-z0-9](?:[A-Za-z0-9.\-]{0,251})(?::[0-9]{1,5})?"
+    r"(?:/[A-Za-z0-9._~%!$&'()*+,;=:@/\-?]*)?$"
+)
 SAFE_PATH_RE = re.compile(r"^/[A-Za-z0-9._~!$&'()*+,;=:@/\-?%]{0,127}$")
 SAFE_PORT_SPEC_RE = re.compile(r"^[0-9,\-]{1,32}$")
 
@@ -267,9 +258,13 @@ def validate_target_token(target: str) -> str:
     cleaned = target.strip()
     if not cleaned or cleaned.startswith("-"):
         raise ToolParamValidationError("Target must be non-empty and must not start with '-'.")
-    if not SAFE_TARGET_RE.match(cleaned):
-        raise ToolParamValidationError(f"Target '{cleaned}' contains disallowed characters.")
-    return cleaned
+    if SAFE_TARGET_RE.match(cleaned):
+        return cleaned
+    # 2.3: catalogued web tools take URLs. Accept them only when the whole string
+    # is a well-formed http(s) URL, never when it merely contains "://".
+    if SAFE_URL_TARGET_RE.match(cleaned):
+        return cleaned
+    raise ToolParamValidationError(f"Target '{cleaned}' contains disallowed characters.")
 
 
 def validate_tool_params(
@@ -345,30 +340,37 @@ def validate_tool_params(
         return {"ports": clean_ports}
 
     if tool_name == "nmap":
-        allowed_flags = set(policy.get("allowed_flags", ["-sV", "-sC", "-sT", "-T1", "-T2", "-Pn", "--open"]))
-        forbidden_flags = set(policy.get("forbidden_flags", [])) | PERMANENTLY_BANNED_NMAP_FLAGS
+        # Timing and NSE flags are governed by the policy row: ``tool:nmap``
+        # allows -T1/-T2, ``tool:nmap_aggressive`` adds -T3/-T4 for engagements
+        # that consented to the extra noise. NSE (``--script``) stays refused.
+        allowed_flags = [str(f) for f in policy.get("allowed_flags", ["-sV", "-sT", "-T1", "-T2", "-Pn", "--open"])]
+        refused_flags = [str(f) for f in policy.get("refused_flags", [])]
         raw_flags = params.get("flags", ["-sV", "-T2", "--open"])
         if not isinstance(raw_flags, list) or len(raw_flags) > 6:
             raise ToolParamValidationError("nmap 'flags' must be a list of at most 6 whitelisted flags.")
 
         clean_flags: list[str] = []
+        floor = set(PERMANENTLY_BANNED_NMAP_FLAGS) | set(refused_flags)
         for flg in raw_flags:
             if not isinstance(flg, str):
                 raise ToolParamValidationError("Every nmap flag must be a string.")
             base_flag = flg.split("=", 1)[0].strip()
-            if flg in forbidden_flags or base_flag in forbidden_flags:
+            if flg in floor or base_flag in floor:
                 raise ToolParamValidationError(
-                    f"Nmap flag '{flg}' is explicitly prohibited (stealth/evasion/high-noise/file-write blocked)."
+                    f"Nmap flag '{flg}' is refused by policy (scripting, evasion, "
+                    "file-write, or raw-packet options are not allowed)."
                 )
-            if flg not in allowed_flags:
+            if flg not in allowed_flags and base_flag not in allowed_flags:
                 raise ToolParamValidationError(
-                    f"Nmap flag '{flg}' is not in parameter whitelist {sorted(allowed_flags)}."
+                    f"Nmap flag '{flg}' is not in this engagement's allowed_flags "
+                    f"{sorted(allowed_flags)}."
                 )
             if flg not in clean_flags:
                 clean_flags.append(flg)
 
-        # Guarantee conservative timing (-T2) if operator did not pass -T1 or -T2.
-        if "-T1" not in clean_flags and "-T2" not in clean_flags:
+        # Keep the run quiet by default, but do not override an explicit timing
+        # choice the policy allowed (-T3/-T4 under tool:nmap_aggressive).
+        if not any(f.startswith("-T") for f in clean_flags):
             clean_flags.append("-T2")
 
         ports = str(params.get("ports", "80,443")).strip()
@@ -383,14 +385,18 @@ def validate_tool_params(
         if not isinstance(raw_flags, list):
             raise ToolParamValidationError("sqlmap 'flags' must be a list.")
         allowed_flags = set(policy.get("allowed_flags", ["--batch", "--level=1", "--risk=1"]))
+        refused = set(BASELINE_REFUSED_FLAGS["sqlmap"]) | set(policy.get("refused_flags", []))
         for flg in raw_flags:
             base = str(flg).split("=", 1)[0].strip().lower()
-            if base in PERMANENTLY_BANNED_SQLMAP_FLAGS:
+            if base in refused:
                 raise ToolParamValidationError(
-                    f"sqlmap flag '{flg}' is PERMANENTLY PROHIBITED by platform safety invariant."
+                    f"sqlmap flag '{flg}' is refused: it turns an injection finding into "
+                    "an OS-level compromise, which no Redstrike posture permits."
                 )
-            if str(flg) not in allowed_flags:
-                raise ToolParamValidationError(f"sqlmap flag '{flg}' not in whitelist {sorted(allowed_flags)}.")
+            if str(flg) not in allowed_flags and base not in allowed_flags:
+                raise ToolParamValidationError(
+                    f"sqlmap flag '{flg}' not in this engagement's allowed_flags {sorted(allowed_flags)}."
+                )
         return {"flags": [str(f) for f in raw_flags]}
 
     if tool_name in {"nmap_aggressive", "hydra", "john"}:
@@ -398,11 +404,85 @@ def validate_tool_params(
         raw_flags = params.get("flags", [])
         if not isinstance(raw_flags, list):
             raise ToolParamValidationError(f"{tool_name} 'flags' must be a list.")
+        refused = set(policy.get("refused_flags", [])) | set(BASELINE_REFUSED_FLAGS.get(tool_name, ()))
         for flg in raw_flags:
-            if str(flg) not in allowed_flags:
+            base = str(flg).split("=", 1)[0].strip()
+            if str(flg) in refused or base in refused:
+                raise ToolParamValidationError(f"{tool_name} flag '{flg}' is refused by policy.")
+            if str(flg) not in allowed_flags and base not in allowed_flags:
                 raise ToolParamValidationError(
-                    f"{tool_name} flag '{flg}' is not in whitelist {sorted(allowed_flags)}."
+                    f"{tool_name} flag '{flg}' is not in this engagement's allowed_flags "
+                    f"{sorted(allowed_flags)}."
                 )
         return {"flags": [str(f) for f in raw_flags]}
 
     raise ToolParamValidationError(f"No parameter validator configured for '{tool_name}'.")
+
+
+# ---------------------------------------------------------------------------
+# Generic catalog-tool surface (2.3)
+# ---------------------------------------------------------------------------
+#: Parameters accepted by any catalogued external tool.
+CATALOG_TOOL_INPUT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["target", "tool"],
+    "properties": {
+        "tool": {"type": "string", "description": "Catalogued tool name (see /api/v1/offensive/tools)."},
+        "target": {"type": "string", "description": "Scope-validated host, URL, or artifact."},
+        "flags": {
+            "type": "array",
+            "items": {"type": "string"},
+            "maxItems": 12,
+            "description": "Flags; each must appear in the tool policy's allowed_flags.",
+        },
+    },
+}
+
+
+def validate_catalog_tool_params(
+    tool_name: str,
+    params: dict[str, Any],
+    policy: dict[str, Any] | None = None,
+    *,
+    binary_path: str | None = None,
+) -> dict[str, Any]:
+    """Validate a call to any tool in :mod:`mcp_server.catalog`.
+
+    Returns ``{"tool": ..., "argv": [...], "flags": [...]}``. ``argv`` is the
+    complete, ready-to-exec argv vector including the binary; the caller must
+    execute it without a shell.
+    """
+    from mcp_server.catalog import get_entry
+
+    entry = get_entry(tool_name)
+    if entry is None:
+        raise ToolParamValidationError(f"Tool '{tool_name}' is not in the catalog.")
+
+    unknown = set(params) - {"target", "flags", "tool"}
+    if unknown:
+        raise ToolParamValidationError(f"Disallowed parameter keys for '{tool_name}': {sorted(unknown)}")
+
+    clean_target = validate_target_token(str(params.get("target", "")))
+    raw_flags = params.get("flags", [])
+    if not isinstance(raw_flags, list) or not all(isinstance(f, str) for f in raw_flags):
+        raise ToolParamValidationError(f"{tool_name} 'flags' must be a list of strings.")
+
+    policy = policy or {}
+    try:
+        argv = build_argv(
+            tool_name,
+            clean_target,
+            flags=raw_flags,
+            allowed_flags=policy.get("allowed_flags", []),
+            refused_flags=policy.get("refused_flags", []),
+            target_flag=policy.get("target_flag"),
+            binary_path=binary_path or entry.binary,
+        )
+    except ArgvBuildError as exc:
+        raise ToolParamValidationError(str(exc)) from exc
+    return {
+        "tool": tool_name,
+        "argv": argv,
+        "flags": [a for a in argv[1:] if a.startswith("-") and a != "--"],
+    }

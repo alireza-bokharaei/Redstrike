@@ -148,11 +148,22 @@ def test_mcp_param_whitelist_and_llm_secret_scrubber() -> None:
     clean = validate_tool_params("nmap", {"flags": ["-sV", "-T2", "--open"], "ports": "80,443"})
     assert clean["flags"] == ["-sV", "-T2", "--open"]
 
-    # Aggressive nmap -T4 and sqlmap --os-shell are permanently blocked
+    # Aggressive nmap -T4 sits outside the default policy row, so it is refused
+    # until an engagement opts into tool:nmap_aggressive.
     with pytest.raises(ToolParamValidationError):
         validate_tool_params("nmap", {"flags": ["-sV", "-T4"], "ports": "80"})
-    with pytest.raises(ToolParamValidationError, match="PERMANENTLY PROHIBITED"):
+    assert validate_tool_params(
+        "nmap", {"flags": ["-sV", "-T4"], "ports": "80"},
+        {"allowed_flags": ["-sV", "-T4"]},
+    )["flags"] == ["-sV", "-T4"]
+
+    # sqlmap --os-shell is refused outright: no posture reaches it.
+    with pytest.raises(ToolParamValidationError, match="refused"):
         validate_tool_params("sqlmap", {"flags": ["--batch", "--os-shell"]})
+    with pytest.raises(ToolParamValidationError, match="refused"):
+        validate_tool_params(
+            "sqlmap", {"flags": ["--os-shell"]}, {"allowed_flags": ["--os-shell"]}
+        )
 
     # LLM secret scrubbing & exploit objective guard
     cfg = load_platform_config(CONFIG_DIR)

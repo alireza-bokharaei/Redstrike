@@ -1,0 +1,45 @@
+# SQL Injection Hunting Playbook
+#
+# Provenance: written for this repository. The referenced upstream catalogue
+# (alireza-bokharaei/pentest-agents) carries no licence, so no markdown, prompt or
+# data file from it is copied here. What is shared is the *workflow shape*: a named
+# hypothesis, a bounded set of observable checks, and a stated refutation.
+#
+# Scope: every step below is one of the autonomous, in-tree tools
+# (tcp_port_probe, http_headers, tls_inspect). Nothing here can call nmap, sqlmap or any approval-gated tool,
+# expand scope, raise a budget or confirm a finding.
+
+id: sqli-hunt
+name: SQL Injection Hunting Playbook
+version: '1.0'
+category: web_hunting
+description: Separate a real injection from an input-validation error using a timing and boolean baseline
+  before any automated run.
+max_steps: 3
+expand_wildcard_subdomains: false
+steps:
+- stage: port_reachability
+  tool: tcp_port_probe
+  params:
+    ports:
+    - 80
+    - 443
+    - 8080
+    - 8443
+  rationale: Locate the database-facing listener.
+- stage: header_posture
+  tool: http_headers
+  params:
+    method: GET
+  rationale: Capture baseline status, length and caching behaviour for the differential.
+- stage: transport
+  tool: tls_inspect
+  params:
+    port: 443
+  rationale: Note the transport posture alongside the baseline.
+prioritization_rules:
+  missing_hsts_severity: low
+  legacy_tls_severity: high
+report_focus: Refute when response time and body length are statistically indistinguishable across a 10x
+  baseline spread, and the error text is a generic validation message. A single quote producing a 500
+  is a defect, not proof of injection.

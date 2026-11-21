@@ -5,7 +5,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     pip install --prefix=/install --require-hashes -r /tmp/requirements.lock
 
 FROM python:3.12-slim-bookworm
-ARG REDGATE_VERSION=2.1.0
+ARG REDGATE_VERSION=2.3.0
 LABEL org.opencontainers.image.title="Redstrike MCP Tools" \
       org.opencontainers.image.version="${REDGATE_VERSION}"
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1

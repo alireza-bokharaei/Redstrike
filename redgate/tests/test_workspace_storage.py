@@ -68,14 +68,25 @@ def test_failed_migration_rolls_back_ddl_and_ledger_and_can_retry(tmp_path, monk
         names = {row[0] for row in conn.execute("SELECT name FROM sqlite_master")}
         assert "schema_migrations" in names
         assert not names.intersection(
-            {"missions", "workspace_assets", "http_evidence", "evidence_no_update"}
+            {
+                "missions",
+                "workspace_assets",
+                "http_evidence",
+                "evidence_no_update",
+                "tls_audits",
+                "expansion_requests",
+            }
         )
         assert conn.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0] == 0
         assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
     # No manually deleted objects/ledger rows are needed to retry a clean source.
     retried = Database(path)
     with retried.connection() as conn:
-        assert conn.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0] == 1
+        # Every shipped migration is applied exactly once on the retry; the count
+        # is not hardcoded so an additive migration does not mask a real failure.
+        applied = conn.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0]
+        expected = len(list((Path(__file__).parents[1] / "gateway/migrations").glob("*.sql")))
+        assert applied == expected >= 1
         assert conn.execute("SELECT COUNT(*) FROM missions").fetchone()[0] == 0
 
 

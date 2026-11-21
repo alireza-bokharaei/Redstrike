@@ -1,0 +1,28 @@
+# SAST Flow Tracing
+#
+# Provenance: written for this repository. The referenced upstream catalogue
+# (alireza-bokharaei/pentest-agents) carries no licence, so no markdown, prompt or
+# data file from it is copied here. What is shared is the *workflow shape*: a named
+# hypothesis, a bounded set of observable checks, and a stated refutation.
+#
+# Scope: every step below is one of the autonomous, in-tree tools
+# (tcp_port_probe, http_headers, tls_inspect). Nothing here can call nmap, sqlmap or any approval-gated tool,
+# expand scope, raise a budget or confirm a finding.
+
+id: sast-flow-trace
+name: SAST Flow Tracing
+version: '1.0'
+category: static_analysis
+description: Trace a tainted value from entry point to sink, naming every sanitiser it passes.
+max_steps: 1
+expand_wildcard_subdomains: false
+steps:
+- stage: header_posture
+  tool: http_headers
+  params:
+    method: GET
+  rationale: Confirm the runtime surface the trace claims to reach.
+prioritization_rules:
+  missing_hsts_severity: info
+report_focus: Refute the flow when a sanitiser on the path is both reachable and effective for the sink's
+  context; state which sanitiser and why it holds.

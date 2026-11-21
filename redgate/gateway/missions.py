@@ -36,8 +36,10 @@ class MissionService:
         scope: ScopePolicyEngine,
         agent: PersonalizedReconAgent,
         sandbox: GoSandboxClient,
+        registry: Any | None = None,
     ) -> None:
         self.db, self.auth, self.scope, self.agent = db, auth, scope, agent
+        self.registry = registry
         self.store = WorkspaceStore(db)
         self.evidence = EvidenceService(db=db, store=self.store, scope=scope, sandbox=sandbox)
         self._tasks: dict[str, asyncio.Task[None]] = {}
@@ -108,6 +110,51 @@ class MissionService:
                 targets.append(result.normalized_target)
         if not principal.can_access_engagement(request.engagement_id):
             raise PermissionError("The operator is not assigned to this engagement.")
+
+        # 2.2: a declared mode freezes a ceiling onto the mission. Omitted modes
+        # keep the legacy 2.1 bounds, so older clients behave exactly as before.
+        mode_id = getattr(request, "mode_id", None)
+        mode_ceiling: dict[str, Any] = {}
+        if mode_id:
+            if self.registry is None:
+                raise ValueError("Operational modes are not configured on this Gateway.")
+            # A composed spec ("pentest+ssl_tls_analysis") is a first-class mode: the
+            # narrowest ceiling of its parts applies and the mandatory obligations are
+            # the union, so composing never loosens a limit.
+            composition = None
+            if "+" in str(mode_id):
+                composed, composition = self.registry.compose(
+                    [p.strip() for p in str(mode_id).split("+") if p.strip()]
+                )
+                if composed.mode_id != mode_id:
+                    raise ValueError(
+                        f"Composed mode '{mode_id}' does not match the computed order "
+                        f"'{composed.mode_id}'."
+                    )
+            elif self.registry.is_composition_alias(mode_id):
+                # A declared shorthand ("pentest_plus_tls") resolves to the same
+                # composed definition, and the audit says which parts it named.
+                composed, composition = self.registry.compose([mode_id])
+                composition["requested_as"] = mode_id
+                mode_id = composed.mode_id
+            mode = self.registry.enforce_ceiling(
+                self.db,
+                mode_id,
+                target_count=len(targets),
+                max_actions=request.max_actions,
+                max_seconds=request.max_seconds,
+            )
+            mode_ceiling = {
+                "max_hosts": mode.ceiling.max_hosts,
+                "max_actions": mode.ceiling.max_actions,
+                "max_seconds": mode.ceiling.max_seconds,
+                "mandatory_capabilities": sorted(mode.mandatory_capabilities),
+                "expansion_clauses": list(mode.expansion_clauses),
+                "captured_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+            }
+            if composition is not None:
+                mode_ceiling["composition"] = composition
+
         mission = self.store.create_mission(
             engagement_id=request.engagement_id,
             requested_by=principal.operator_id,
@@ -120,11 +167,22 @@ class MissionService:
             max_actions=request.max_actions,
             max_seconds=request.max_seconds,
         )
+        if mode_id:
+            self.store.bind_mode(mission["mission_id"], mode_id, mode_ceiling)
+            mission = self.store.get_mission(mission["mission_id"]) or mission
         self.audit(
             mission,
             "create",
             principal.operator_id,
-            detail=f"Planned {len(targets)} scope-checked read-only intents.",
+            detail=(
+                f"Planned {len(targets)} scope-checked read-only intents."
+                + (
+                    f" Mode={mode_id} ceiling={mode_ceiling.get('max_actions')} actions/"
+                    f"{mode_ceiling.get('max_seconds')}s."
+                    if mode_id
+                    else " Legacy 2.1 bounds (no mode declared)."
+                )
+            ),
         )
         return mission
 
@@ -437,7 +495,7 @@ class MissionService:
             return html.escape(str(value)).replace("|", "\\|").replace("\n", " ").replace("`", "'")
 
         lines = [
-            f"# Redstrike 2.1.0 — {safe(mission['name'])}",
+            f"# Redstrike 2.3.1 — {safe(mission['name'])}",
             "",
             f"- Mission: `{mission['mission_id']}`",
             f"- Engagement: `{safe(mission['engagement_id'])}`",

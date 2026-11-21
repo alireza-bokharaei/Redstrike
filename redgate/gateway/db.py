@@ -1467,3 +1467,112 @@ class Database:
         item["dual_verified"] = bool(item["dual_verified"])
         item["requires_human_judgment"] = bool(item["requires_human_judgment"])
         return item
+
+    # ------------------------------------------------------------------
+    # 2.2 Capability surface: quota elevation support
+    # ------------------------------------------------------------------
+
+    def raise_quota(
+        self, *, operator_id: str, calls_delta: int = 0, tokens_delta: int = 0
+    ) -> dict[str, Any]:
+        """Raise the CURRENT period's quota ceilings for an operator.
+
+        Called only from an approved expansion request. Historical periods keep
+        their original ceilings so the audit trail shows when a limit moved.
+        """
+        calls_delta, tokens_delta = max(0, int(calls_delta)), max(0, int(tokens_delta))
+        if not calls_delta and not tokens_delta:
+            raise ValueError("A quota elevation must raise calls and/or tokens.")
+        with self._write_lock, self.connection() as conn:
+            conn.execute("BEGIN IMMEDIATE;")
+            try:
+                rows = conn.execute(
+                    "SELECT * FROM quota WHERE operator_id = ? AND "
+                    "period_key = (SELECT MAX(period_key) FROM quota WHERE operator_id = ?) "
+                    "ORDER BY id DESC LIMIT 1",
+                    (operator_id, operator_id),
+                ).fetchone()
+                if not rows:
+                    conn.execute("COMMIT;")
+                    raise ValueError(f"No quota row exists yet for operator '{operator_id}'.")
+                before = dict(rows)
+                conn.execute(
+                    "UPDATE quota SET max_calls = max_calls + ?, max_tokens = max_tokens + ?, "
+                    "updated_at = ? WHERE id = ?",
+                    (calls_delta, tokens_delta, utc_now_iso(), before["id"]),
+                )
+                after = conn.execute(
+                    "SELECT * FROM quota WHERE id = ?", (before["id"],)
+                ).fetchone()
+                conn.execute("COMMIT;")
+                return {
+                    "quota_before": {
+                        "max_calls": before["max_calls"],
+                        "max_tokens": before["max_tokens"],
+                    },
+                    "quota_after": {
+                        "max_calls": after["max_calls"],
+                        "max_tokens": after["max_tokens"],
+                    },
+                }
+            except Exception:
+                if conn.in_transaction:
+                    conn.execute("ROLLBACK;")
+                raise
+
+    # ------------------------------------------------------------------
+    # 2.3 offensive surface — delegated to OffensiveStore
+    # ------------------------------------------------------------------
+    @property
+    def offensive(self):
+        """Lazy accessor for the 2.3 offensive-surface store.
+
+        Kept lazy so importing ``gateway.db`` stays free of a cycle with
+        ``gateway.offensive_store``.
+        """
+        from gateway.offensive_store import OffensiveStore
+
+        store = getattr(self, "_offensive_store", None)
+        if store is None:
+            store = OffensiveStore(self)
+            self._offensive_store = store
+        return store
+
+    def upsert_policy(self, **kwargs):
+        return self.offensive.upsert_policy(**kwargs)
+
+    def get_policy(self, policy_id: str):
+        return self.offensive.get_policy(policy_id)
+
+    def list_policies(self, policy_type: str | None = None):
+        return self.offensive.list_policies(policy_type)
+
+    def set_engagement_posture(self, engagement_id: str, posture_id: str, actor: str) -> None:
+        return self.offensive.set_engagement_posture(engagement_id, posture_id, actor)
+
+    def get_engagement_posture(self, engagement_id: str):
+        return self.offensive.get_engagement_posture(engagement_id)
+
+    def save_consent(self, **kwargs):
+        return self.offensive.save_consent(**kwargs)
+
+    def get_consent(self, consent_id: str):
+        return self.offensive.get_consent(consent_id)
+
+    def list_consents(self, **kwargs):
+        return self.offensive.list_consents(**kwargs)
+
+    def revoke_consent(self, consent_id: str):
+        return self.offensive.revoke_consent(consent_id)
+
+    def save_scan_authorization(self, **kwargs):
+        return self.offensive.save_scan_authorization(**kwargs)
+
+    def get_scan_authorization(self, authorization_id: str):
+        return self.offensive.get_scan_authorization(authorization_id)
+
+    def live_scan_authorization(self, engagement_id: str):
+        return self.offensive.live_scan_authorization(engagement_id)
+
+    def consume_scan_budget(self, authorization_id: str, requests: int):
+        return self.offensive.consume_scan_budget(authorization_id, requests)

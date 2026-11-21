@@ -1,0 +1,44 @@
+# Transport Posture Sweep
+#
+# Provenance: written for this repository. The referenced upstream catalogue
+# (alireza-bokharaei/pentest-agents) carries no licence, so no markdown, prompt or
+# data file from it is copied here. What is shared is the *workflow shape*: a named
+# hypothesis, a bounded set of observable checks, and a stated refutation.
+#
+# Scope: every step below is one of the autonomous, in-tree tools
+# (tcp_port_probe, http_headers, tls_inspect). Nothing here can call nmap, sqlmap or any approval-gated tool,
+# expand scope, raise a budget or confirm a finding.
+
+id: transport-posture-sweep
+name: Transport Posture Sweep
+version: '1.0'
+category: transport
+description: 'A TLS-only engagement: protocol floor, cipher strength, certificate lifecycle and HSTS,
+  per host.'
+max_steps: 3
+expand_wildcard_subdomains: false
+steps:
+- stage: port_reachability
+  tool: tcp_port_probe
+  params:
+    ports:
+    - 443
+    - 8443
+  rationale: Confirm the TLS listeners before probing them.
+- stage: transport
+  tool: tls_inspect
+  params:
+    port: 443
+  rationale: The primary handshake record.
+- stage: header_posture
+  tool: http_headers
+  params:
+    method: GET
+  rationale: HSTS is read from the response, not inferred from the certificate.
+prioritization_rules:
+  legacy_tls_severity: high
+  expiring_cert_days_high: 14
+  expiring_cert_days_medium: 30
+  missing_hsts_severity: high
+report_focus: Refute a weak-cipher finding when the negotiated suite is only offered to a legacy client
+  that the allowlist does not reach. Name the protocol actually negotiated for each host.

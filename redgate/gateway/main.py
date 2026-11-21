@@ -26,12 +26,26 @@ from fastapi.staticfiles import StaticFiles
 from gateway import __version__
 from gateway.agent import PersonalizedReconAgent
 from gateway.auth import AuthManager, OperatorPrincipal
+from gateway.capabilities import CapabilityRegistry
+from gateway.bugbounty import BugBountyService
+from gateway.capability_api import capability_router
+from gateway.coverage import CoverageLedger, ResponseTracker
+from gateway.intel_api import intel_router
+from gateway.intel_engine import OutcomeStore
+from gateway.evidence_gate import EvidenceGate
+from gateway.exploitation import ExploitationService
+from gateway.exploration import ExplorationService
+from gateway.hunt_loop import HuntLoopService
 from gateway.config_loader import PlatformConfig, load_platform_config, seed_database_from_config
 from gateway.db import Database, utc_now_iso
 from gateway.llm_proxy import LLMProxyError, LLMProxyGateway
 from gateway.mcp_client import MCPBridgeClient, MCPClientError
 from gateway.memory import AgentMemoryEngine
 from gateway.missions import MissionService
+from gateway.offensive_api import offensive_router
+from gateway.offensive_policy import OffensivePolicyEngine
+from gateway.pwntools_layer import PwntoolsLayer
+from gateway.scan_runner import ScanRunner
 from gateway.model_hub import (
     LocalModelHub,
     validate_llm_endpoint_url,
@@ -56,7 +70,10 @@ from gateway.models import (
 )
 from gateway.policy import ScopePolicyEngine, validate_allowlist_entry_syntax
 from gateway.sandbox_client import GoSandboxClient, SandboxClientError
+from gateway.expansion import ExpansionService
 from gateway.skills import SkillValidationError, validate_skill_spec
+from gateway.tls_audit import TLSProbeProfile, TLSAuditService
+from gateway.workspace_store import WorkspaceStore
 from gateway.validators import ScriptValidationOrchestrator
 from gateway.workspace_api import workspace_router
 from mcp_server.tools import ToolParamValidationError, validate_tool_params
@@ -81,6 +98,24 @@ class GatewayRuntime:
     sandbox: GoSandboxClient
     sandbox_mem_mb: int
     sandbox_max_output: int
+    # ---- 2.2 capability layers (widened but governed policy surface) ----
+    registry: CapabilityRegistry
+    evidence_gate: EvidenceGate
+    tls_audit: TLSAuditService
+    artifact_root: Path
+    # ---- 2.3 offensive surface -------------------------------------------
+    policies: OffensivePolicyEngine
+    exploitation: ExploitationService
+    exploration: ExplorationService
+    bounty: BugBountyService
+    pwntools: PwntoolsLayer
+    loops: HuntLoopService
+    runner: ScanRunner
+    store: WorkspaceStore
+    # ---- 2.3.1 intel / coverage ------------------------------------------
+    intel_outcomes: OutcomeStore
+    coverage: CoverageLedger
+    responses: ResponseTracker
 
 
 def build_runtime() -> GatewayRuntime:
@@ -102,7 +137,15 @@ def build_runtime() -> GatewayRuntime:
     sandbox_mem_mb = int(sb_defaults.get("max_memory_mb", 128))
     sandbox_max_output = int(sb_defaults.get("max_output_bytes", 65536))
 
+    artifact_root = Path(
+        os.environ.get("REDGATE_ARTIFACT_DIR", str(repo_root / "data" / "artifacts"))
+    ).resolve()
+    artifact_root.mkdir(parents=True, exist_ok=True)
+
     scope = ScopePolicyEngine(db, cfg.allowlist.get("dns_security"))
+    registry = CapabilityRegistry.from_file(config_dir / "capabilities.yaml")
+    evidence_gate = EvidenceGate(registry.evidence_gate())
+
     llm = LLMProxyGateway(cfg.llm_proxy, runtime_getter=db.get_or_init_llm_runtime)
     model_hub = LocalModelHub(cfg.local_models)
     memory = AgentMemoryEngine(db=db, llm_proxy=llm)
@@ -123,6 +166,23 @@ def build_runtime() -> GatewayRuntime:
         sandbox_max_output=sandbox_max_output,
     )
 
+    tls_audit = TLSAuditService(
+        db=db,
+        scope=scope,
+        store=WorkspaceStore(db),
+        profile=TLSProbeProfile.from_manifest(registry.tls_profile()),
+        evidence_gate=evidence_gate,
+    )
+
+    # ---- 2.3: the offensive surface -------------------------------------
+    # The policy engine seeds itself from config/policies.yaml on first use, so a
+    # fresh database is immediately consistent with the declarative manifest.
+    workspace_store = WorkspaceStore(db)
+    policies = OffensivePolicyEngine(
+        db, OffensivePolicyEngine.load_manifest(config_dir / "policies.yaml")
+    )
+    policies.seed()
+
     return GatewayRuntime(
         config=cfg,
         db=db,
@@ -137,13 +197,52 @@ def build_runtime() -> GatewayRuntime:
         sandbox=sandbox,
         sandbox_mem_mb=sandbox_mem_mb,
         sandbox_max_output=sandbox_max_output,
+        registry=registry,
+        evidence_gate=evidence_gate,
+        tls_audit=tls_audit,
+        artifact_root=artifact_root,
+        policies=policies,
+        exploitation=ExploitationService(
+            db=db, scope=scope, store=workspace_store, policies=policies
+        ),
+        exploration=ExplorationService(
+            db=db, scope=scope, store=workspace_store, policies=policies
+        ),
+        bounty=BugBountyService(db=db, scope=scope),
+        pwntools=PwntoolsLayer(
+            db=db, scope=scope, policies=policies, artifact_root=str(artifact_root)
+        ),
+        loops=HuntLoopService(db=db),
+        runner=ScanRunner(db=db, scope=scope, policies=policies, mcp=mcp),
+        store=workspace_store,
+        intel_outcomes=OutcomeStore(db),
+        coverage=CoverageLedger(db),
+        responses=ResponseTracker(db),
     )
 
 
 def create_app(runtime: GatewayRuntime | None = None) -> FastAPI:
     """Create and wire the FastAPI Gateway application."""
     rt = runtime or build_runtime()
-    workspace = MissionService(db=rt.db, auth=rt.auth, scope=rt.scope, agent=rt.agent, sandbox=rt.sandbox)
+    workspace = MissionService(
+        db=rt.db,
+        auth=rt.auth,
+        scope=rt.scope,
+        agent=rt.agent,
+        sandbox=rt.sandbox,
+        registry=rt.registry,
+    )
+    # Deep TLS analysis reaches the HSTS header through the same governed MCP
+    # bridge as every other tool; it never opens a header probe of its own.
+    rt.tls_audit.mcp = rt.mcp
+    expansion_service = ExpansionService(
+        db=rt.db,
+        scope=rt.scope,
+        store=WorkspaceStore(rt.db),
+        policy=rt.registry.expansion_policy(),
+        registry=rt.registry,
+    )
+    application_tls = rt.tls_audit
 
     @asynccontextmanager
     async def lifespan(_application: FastAPI):
@@ -411,7 +510,31 @@ def create_app(runtime: GatewayRuntime | None = None) -> FastAPI:
             "status": "ok",
             "gateway": "online",
             "version": __version__,
-            "features": {"missions": True, "asset_graph": True, "http_evidence": True, "header_retests": True},
+            "features": {
+                "missions": True,
+                "asset_graph": True,
+                "http_evidence": True,
+                "header_retests": True,
+                "capability_modes": rt.registry.enabled,
+                "tls_deep_analysis": True,
+                "expansion_requests": True,
+                "evidence_gate": True,
+                "agent_roles": True,
+                "binary_triage": True,
+                # ---- 2.3 offensive surface ----
+                "offensive_policies": True,
+                "offensive_tools": True,
+                "tool_catalog_size": len(rt.runner.installed_tools()),
+                "exploitation_lifecycle": True,
+                "attack_chains": True,
+                "bug_bounty": True,
+                "pwntools_layer": rt.pwntools.availability()["available"],
+                "recursive_discovery": True,
+                "mass_scan_budgets": True,
+                "hunt_loops": True,
+                "agent_brain": True,
+                "agent_roles_count": len(rt.loops.roster()["roles"]),
+            },
             "gateway_port": int(os.environ.get("REDGATE_GATEWAY_PORT", "8000")),
             "mcp_server": mcp_health,
             "sandbox_runner": sb_health,
@@ -1653,6 +1776,46 @@ def create_app(runtime: GatewayRuntime | None = None) -> FastAPI:
         return {"finding": updated, "learned_memory": learned_memory}
 
     application.include_router(workspace_router(workspace, get_principal, ensure_engagement_access))
+    application.include_router(
+        capability_router(
+            registry=rt.registry,
+            gate=rt.evidence_gate,
+            tls=application_tls,
+            expansion=expansion_service,
+            db=rt.db,
+            store=expansion_service.store,
+            get_principal=get_principal,
+            ensure_access=ensure_engagement_access,
+            artifact_root=str(rt.artifact_root),
+        )
+    )
+    application.include_router(
+        offensive_router(
+            db=rt.db,
+            policies=rt.policies,
+            exploitation=rt.exploitation,
+            exploration=rt.exploration,
+            bounty=rt.bounty,
+            pwntools=rt.pwntools,
+            loops=rt.loops,
+            runner=rt.runner,
+            registry=rt.registry,
+            store=rt.store,
+            get_principal=get_principal,
+            ensure_access=ensure_engagement_access,
+        )
+    )
+    application.include_router(
+        intel_router(
+            db=rt.db,
+            outcomes=rt.intel_outcomes,
+            coverage=rt.coverage,
+            tracker=rt.responses,
+            get_principal=get_principal,
+            ensure_access=ensure_engagement_access,
+        )
+    )
+    application.state.expansion = expansion_service
 
     # ------------------------------------------------------------------
     # Optional Web Management Console (Static Assets)

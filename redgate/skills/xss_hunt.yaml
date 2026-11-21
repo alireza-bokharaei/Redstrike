@@ -1,0 +1,46 @@
+# XSS Hunting Playbook
+#
+# Provenance: written for this repository. The referenced upstream catalogue
+# (alireza-bokharaei/pentest-agents) carries no licence, so no markdown, prompt or
+# data file from it is copied here. What is shared is the *workflow shape*: a named
+# hypothesis, a bounded set of observable checks, and a stated refutation.
+#
+# Scope: every step below is one of the autonomous, in-tree tools
+# (tcp_port_probe, http_headers, tls_inspect). Nothing here can call nmap, sqlmap or any approval-gated tool,
+# expand scope, raise a budget or confirm a finding.
+
+id: xss-hunt
+name: XSS Hunting Playbook
+version: '1.0'
+category: web_hunting
+description: 'Reflected, stored and DOM cross-site scripting: establish an input->output map, then a marker
+  payload, then a refutation.'
+max_steps: 3
+expand_wildcard_subdomains: false
+steps:
+- stage: port_reachability
+  tool: tcp_port_probe
+  params:
+    ports:
+    - 80
+    - 443
+    - 8080
+    - 8443
+  rationale: Confirm the HTTP surface before any payload is sent.
+- stage: header_posture
+  tool: http_headers
+  params:
+    method: GET
+  rationale: 'Read CSP and X-Content-Type-Options: they decide whether a marker can execute.'
+- stage: transport
+  tool: tls_inspect
+  params:
+    port: 443
+  rationale: A downgradeable transport makes a captured marker replayable.
+prioritization_rules:
+  missing_csp_severity: medium
+  missing_hsts_severity: medium
+  legacy_tls_severity: high
+report_focus: 'Refute by showing the marker is HTML-encoded in the response and that no DOM sink (innerHTML/document.write/eval)
+  consumes the reflected value. An unencoded reflection alone is not XSS: the executing context must be
+  stated.'

@@ -1,0 +1,34 @@
+# Mobile Application Triage
+#
+# Provenance: written for this repository. The referenced upstream catalogue
+# (alireza-bokharaei/pentest-agents) carries no licence, so no markdown, prompt or
+# data file from it is copied here. What is shared is the *workflow shape*: a named
+# hypothesis, a bounded set of observable checks, and a stated refutation.
+#
+# Scope: every step below is one of the autonomous, in-tree tools
+# (tcp_port_probe, http_headers, tls_inspect). Nothing here can call nmap, sqlmap or any approval-gated tool,
+# expand scope, raise a budget or confirm a finding.
+
+id: mobile-app-triage
+name: Mobile Application Triage
+version: '1.0'
+category: mobile_assessment
+description: Manifest exports, hard-coded secrets and transport settings for a local APK artifact.
+max_steps: 2
+expand_wildcard_subdomains: false
+steps:
+- stage: header_posture
+  tool: http_headers
+  params:
+    method: GET
+  rationale: Inspect the backend the app talks to, if it is in scope.
+- stage: transport
+  tool: tls_inspect
+  params:
+    port: 443
+  rationale: The API's TLS posture is the app's effective floor on old devices.
+prioritization_rules:
+  missing_hsts_severity: medium
+  legacy_tls_severity: high
+report_focus: Refute an exported-component finding when the component is protected by a signature-level
+  permission, or when the exported intent requires a permission the attacker app cannot hold.

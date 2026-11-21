@@ -1,0 +1,28 @@
+# Response Diff Review
+#
+# Provenance: written for this repository. The referenced upstream catalogue
+# (alireza-bokharaei/pentest-agents) carries no licence, so no markdown, prompt or
+# data file from it is copied here. What is shared is the *workflow shape*: a named
+# hypothesis, a bounded set of observable checks, and a stated refutation.
+#
+# Scope: every step below is one of the autonomous, in-tree tools
+# (tcp_port_probe, http_headers, tls_inspect). Nothing here can call nmap, sqlmap or any approval-gated tool,
+# expand scope, raise a budget or confirm a finding.
+
+id: response-diff-review
+name: Response Diff Review
+version: '1.0'
+category: validation
+description: Explain what changed between two observations and who must re-verify.
+max_steps: 1
+expand_wildcard_subdomains: false
+steps:
+- stage: header_posture
+  tool: http_headers
+  params:
+    method: GET
+  rationale: Take a fresh observation for the comparison floor.
+prioritization_rules:
+  missing_hsts_severity: medium
+report_focus: 'Refute a ''no change'' conclusion when the body shape hash differs: a stable HTTP 200 hides
+  content changes.'

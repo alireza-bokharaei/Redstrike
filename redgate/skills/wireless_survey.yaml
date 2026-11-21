@@ -1,0 +1,30 @@
+# Wireless Survey Summary
+#
+# Provenance: written for this repository. The referenced upstream catalogue
+# (alireza-bokharaei/pentest-agents) carries no licence, so no markdown, prompt or
+# data file from it is copied here. What is shared is the *workflow shape*: a named
+# hypothesis, a bounded set of observable checks, and a stated refutation.
+#
+# Scope: every step below is one of the autonomous, in-tree tools
+# (tcp_port_probe, http_headers, tls_inspect). Nothing here can call nmap, sqlmap or any approval-gated tool,
+# expand scope, raise a budget or confirm a finding.
+
+id: wireless-survey
+name: Wireless Survey Summary
+version: '1.0'
+category: network_survey
+description: 'Authorised RF survey: encryption posture, WPS exposure and rogue AP identification.'
+max_steps: 1
+expand_wildcard_subdomains: false
+steps:
+- stage: port_reachability
+  tool: tcp_port_probe
+  params:
+    ports:
+    - 80
+    - 443
+  rationale: Confirm the management plane the survey reports into.
+prioritization_rules:
+  missing_hsts_severity: info
+report_focus: Refute a rogue-AP claim when the BSSID matches documented corporate infrastructure in the
+  asset inventory. Capture evidence, never deauthenticate.

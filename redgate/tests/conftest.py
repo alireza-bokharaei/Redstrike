@@ -32,7 +32,7 @@ class FakeMCP:
         self.after_call = None
 
     async def health(self) -> dict[str, Any]:
-        return {"status": "ok", "version": "2.1.0"}
+        return {"status": "ok", "version": "2.3.1"}
 
     async def call_tool(self, **kwargs) -> dict[str, Any]:
         self.calls.append(kwargs)
@@ -69,7 +69,7 @@ class FakeSandbox:
         self.entered = asyncio.Event()
 
     async def health(self) -> dict[str, Any]:
-        return {"status": "ok", "version": "2.1.0", "http_evidence": True}
+        return {"status": "ok", "version": "2.3.1", "http_evidence": True}
 
     async def capture_http(self, **kwargs) -> dict[str, Any]:
         self.calls.append(kwargs)

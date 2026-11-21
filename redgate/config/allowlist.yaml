@@ -13,12 +13,25 @@ dns_security:
   resolve_domains_at_check_time: true
 
 engagements:
+  # ---------------------------------------------------------------------------
+  # OPTIONAL 2.2 WIDENING CLAUSES
+  # `expansion_clauses` is an explicit opt-in list. An engagement that omits it
+  # (or leaves it empty) CANNOT be widened mid-engagement, no matter what an
+  # approver clicks. Recognised clause ids must also appear in
+  # config/capabilities.yaml under the active mode's `expansion.allowed_clauses`.
+  #
+  #   related_assets      - assets the written RoE describes as part of the scope
+  #   in_scope_subdomains - subdomains the written RoE declares in scope
+  # ---------------------------------------------------------------------------
   - id: "ENG-2026-001"
     name: "Q4 Internal Perimeter Assessment"
     description: "Authorized assessment under signed Rules of Engagement #RoE-2026-Q4"
     valid_from: "2026-01-01T00:00:00Z"
     valid_until: "2027-12-31T23:59:59Z"
     active: true
+    expansion_clauses:
+      - "related_assets"
+      - "in_scope_subdomains"
     targets:
       - target: "192.0.2.0/24"
         description: "RFC 5737 TEST-NET-1 staging subnet (replace with authorized CIDR)"
@@ -43,6 +56,8 @@ engagements:
     valid_from: "2026-01-01T00:00:00Z"
     valid_until: "2027-12-31T23:59:59Z"
     active: true
+    # Deliberately empty: a self-test lab must not be widenable by design.
+    expansion_clauses: []
     targets:
       - target: "127.0.0.1"
         description: "Explicitly authorized loopback for local self-test endpoint only"

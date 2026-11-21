@@ -1,0 +1,371 @@
+# =============================================================================
+# Redstrike 2.3 — Capability Manifest, Operational Modes, Composition & Expansion
+#
+# This file declares the WIDENED (but still governed) policy surface introduced
+# in 2.2. It can raise what an engagement MAY do; it cannot remove the code-level
+# invariants in mcp_server/tools.py (permanently banned flags), gateway/policy.py
+# (cloud metadata / rebinding guard) or the database CHECK enforcing the
+# Two-Person Rule. Every mode below is a CEILING that is still intersected with
+# the signed engagement scope and the live tool policy in SQLite.
+# =============================================================================
+
+manifest_version: "2.3"
+
+# -----------------------------------------------------------------------------
+# Integrated capability layers. `status` describes what THIS repository can run
+# today; it is not a parity claim for the referenced upstream projects.
+# -----------------------------------------------------------------------------
+layers:
+  - id: "tool_execution"
+    name: "Tool Execution Layer (HexStrike-compatible adapter surface)"
+    status: "available"
+    adapter: "mcp_server"
+    upstream_reference: "alireza-bokharaei/hexstrike-ai"
+    provenance: >
+      Independently implemented on Redstrike's existing MCP bridge. No hexstrike-ai
+      source was vendored; tool schemas, argv construction and parameter whitelists
+      are Redstrike originals. The upstream project is not licensed for redistribution
+      and is not a dependency of this repository.
+    note: >
+      The active catalog is the curated tool set registered in mcp_server/tools.py.
+      Registry size is reported by the API at runtime instead of a hardcoded
+      "150 tools" claim.
+
+  - id: "specialized_agents"
+    name: "Specialized Agent Layer (roles + evidence gate)"
+    status: "available"
+    adapter: "gateway/agents_registry.py"
+    upstream_reference: "alireza-bokharaei/pentest-agents"
+    provenance: >
+      Role catalogue and the seven-question evidence gate are Redstrike originals
+      modelled on the referenced workflow. No agent markdown, hooks, or CLI tooling
+      from the upstream repository is copied or executed.
+    note: >
+      Agent roles are advisory planners over governed primitives. A role cannot
+      execute a tool, raise a budget, widen scope, or confirm a finding. Model
+      output remains strong guidance that the evidence gate may reject.
+
+  - id: "binary_low_level"
+    name: "Binary & Low-Level Layer (static hardening triage)"
+    status: "restricted"
+    adapter: "gateway/binary_triage.py"
+    upstream_reference: "alireza-bokharaei/pwntools"
+    provenance: >
+      Read-only ELF hardening triage implemented with the Python standard library.
+      pwntools is NOT imported, bundled, or invoked. Weaponised exploit automation,
+      shellcode generation and remote process interaction are deliberately absent.
+    note: >
+      Only enabled for the `ctf` mode with an approver/admin principal and a local
+      artifact under the configured artifact directory. Nothing here contacts a
+      network target.
+
+# -----------------------------------------------------------------------------
+# Operational modes. `ceiling` values are validated against hard model limits.
+# -----------------------------------------------------------------------------
+modes:
+  - id: "vulnerability_discovery"
+    label: "Vulnerability Discovery"
+    summary: "Deep, systematic discovery across web, network, API and TLS surface."
+    default_skill: "perimeter-recon-pipeline"
+    ceiling:
+      max_hosts: 8
+      max_actions: 64
+      max_seconds: 1800
+      concurrent_missions: 2
+    capabilities:
+      - "recon"
+      - "http_header_audit"
+      - "port_probe"
+      - "tls_deep_analysis"
+      - "script_validation_sandbox"
+      - "external_tls_adapters"
+      - "finding_retest"
+      - "correlation"
+    mandatory_capabilities:
+      - "tls_deep_analysis"
+    expansion:
+      allowed_clauses: ["related_assets", "in_scope_subdomains"]
+      max_per_mission: 4
+      max_hosts_added: 8
+      requires_approver: true
+
+  - id: "bug_bounty"
+    label: "Bug Bounty"
+    summary: "Scope-synchronised hunting loops, duplicate awareness and report drafting."
+    default_skill: "perimeter-recon-pipeline"
+    ceiling:
+      max_hosts: 8
+      max_actions: 64
+      max_seconds: 1800
+      concurrent_missions: 2
+    capabilities:
+      - "recon"
+      - "http_header_audit"
+      - "port_probe"
+      - "tls_deep_analysis"
+      - "external_tls_adapters"
+      - "finding_retest"
+      - "correlation"
+      - "report_drafting"
+      - "duplicate_hinting"
+    mandatory_capabilities:
+      - "tls_deep_analysis"
+    expansion:
+      allowed_clauses: ["related_assets", "in_scope_subdomains"]
+      max_per_mission: 6
+      max_hosts_added: 8
+      requires_approver: true
+
+  - id: "pentest"
+    label: "Penetration Test (full engagement)"
+    summary: "End-to-end authorised workflow from recon to reporting."
+    default_skill: "web-surface-audit"
+    ceiling:
+      max_hosts: 8
+      max_actions: 64
+      max_seconds: 1800
+      concurrent_missions: 2
+    capabilities:
+      - "recon"
+      - "http_header_audit"
+      - "port_probe"
+      - "tls_deep_analysis"
+      - "external_tls_adapters"
+      - "script_validation_sandbox"
+      - "finding_retest"
+      - "correlation"
+      - "chain_analysis"
+      - "report_drafting"
+      - "privilege_elevation_request"
+    mandatory_capabilities:
+      - "tls_deep_analysis"
+    expansion:
+      allowed_clauses: ["related_assets", "in_scope_subdomains"]
+      max_per_mission: 6
+      max_hosts_added: 8
+      requires_approver: true
+
+  - id: "ctf"
+    label: "CTF / Challenge"
+    summary: "Local challenge solving with binary triage; never widens network scope."
+    default_skill: "web-surface-audit"
+    ceiling:
+      max_hosts: 4
+      max_actions: 32
+      max_seconds: 900
+      concurrent_missions: 2
+    capabilities:
+      - "recon"
+      - "http_header_audit"
+      - "port_probe"
+      - "tls_deep_analysis"
+      - "binary_hardening_triage"
+      - "report_drafting"
+    mandatory_capabilities: []
+    expansion:
+      allowed_clauses: []
+      max_per_mission: 0
+      max_hosts_added: 0
+      requires_approver: true
+
+  - id: "assessment"
+    label: "Security Assessment & Review"
+    summary: "Configuration review, hardening checks and risk prioritisation."
+    default_skill: "api-posture-triage"
+    ceiling:
+      max_hosts: 8
+      max_actions: 48
+      max_seconds: 1800
+      concurrent_missions: 2
+    capabilities:
+      - "recon"
+      - "http_header_audit"
+      - "tls_deep_analysis"
+      - "external_tls_adapters"
+      - "report_drafting"
+      - "correlation"
+    mandatory_capabilities:
+      - "tls_deep_analysis"
+    expansion:
+      allowed_clauses: ["related_assets"]
+      max_per_mission: 2
+      max_hosts_added: 4
+      requires_approver: true
+
+  - id: "ssl_tls_analysis"
+    label: "SSL/TLS Deep Analysis"
+    summary: "Protocol, cipher, certificate and HSTS analysis. Mandatory for any TLS target."
+    default_skill: "perimeter-recon-pipeline"
+    ceiling:
+      max_hosts: 8
+      max_actions: 64
+      max_seconds: 1800
+      concurrent_missions: 2
+    capabilities:
+      - "recon"
+      - "tls_deep_analysis"
+      - "external_tls_adapters"
+      - "http_header_audit"
+      - "finding_retest"
+      - "report_drafting"
+    mandatory_capabilities:
+      - "tls_deep_analysis"
+    expansion:
+      allowed_clauses: ["in_scope_subdomains"]
+      max_per_mission: 2
+      max_hosts_added: 4
+      requires_approver: true
+
+
+# -----------------------------------------------------------------------------
+# Deep SSL/TLS analysis (mandatory component for TLS-bearing engagements).
+# -----------------------------------------------------------------------------
+tls_audit:
+  enabled: true
+  allowed_ports: [443, 8443]
+  timeout_sec: 15
+  # Probed in this order; only the intersection with an allowlist policy runs.
+  probe_protocols:
+    - "TLSv1.3"
+    - "TLSv1.2"
+    - "TLSv1.1"
+    - "TLSv1"
+    - "SSLv3"
+  deprecated_protocols: ["TLSv1", "TLSv1.1", "SSLv3"]
+  minimum_acceptable_protocol: "TLSv1.2"
+  weak_cipher_markers:
+    - "RC4"
+    - "3DES"
+    - "DES-CBC3"
+    - "NULL"
+    - "EXPORT"
+    - "MD5"
+    - "CBC"
+  weak_key_bits:
+    rsa: 2048
+    ec: 224
+  certificate:
+    expiring_warning_days: 30
+    expiring_critical_days: 14
+    weak_signature_algorithms: ["md5", "sha1"]
+  hsts:
+    check: true
+    minimum_max_age_seconds: 15552000
+  # Versioned external adapters. argv-only, never a shell string. Each adapter is
+  # an approval-gated tool that must also be enabled in config/tool_policy.yaml.
+  external_adapters:
+    - id: "testssl"
+      binary: "testssl.sh"
+      risk_level: "medium"
+      allowed_args: ["--quiet", "--color", "0", "--protocols", "--ciphers", "--vulnerable", "--headers", "--server-defaults", "--jsonfile", "/tmp/out.json"]
+      arg_value_regex: "^[A-Za-z0-9._,:@\\-]{0,64}$"
+    - id: "sslyze"
+      binary: "sslyze"
+      risk_level: "medium"
+      allowed_args: ["--json_out=-", "--regular"]
+      arg_value_regex: "^[A-Za-z0-9._,:@\\-]{0,64}$"
+    - id: "sslscan"
+      binary: "sslscan"
+      risk_level: "low"
+      allowed_args: ["--no-colour", "--show-certificates"]
+      arg_value_regex: "^[A-Za-z0-9._,:@\\-]{0,64}$"
+
+# -----------------------------------------------------------------------------
+# Mid-engagement expansion / elevation requests.
+# -----------------------------------------------------------------------------
+expansion:
+  enabled: true
+  # Only these targets may be requested; each still passes allowlist syntax
+  # validation, the metadata/rebinding guard and the RoE clause check.
+  request_ttl_seconds: 3600
+  max_pending_per_mission: 5
+  budget_elevation:
+    max_actions_increase: 32
+    max_seconds_increase: 900
+    max_total_actions: 128
+    max_total_seconds: 3600
+  quota_elevation:
+    max_calls_increase: 200
+    max_tokens_increase: 200000
+  # An expansion never bypasses this: it must be decided by a different person.
+  require_distinct_approver: true
+
+
+# -----------------------------------------------------------------------------
+# Mode composition. The prompt calls its modes "combinable"; composing is a
+# deliberate act with a fixed precedence, not free-form union.
+#
+#   capabilities = base ∪ each add-on, minus `remove`
+#   mandatory    = base mandatory ∪ each add-on mandatory   (never removable)
+#   ceiling      = the NARROWEST of every participating mode
+#   expansion    = intersection (a clause must be declared by every mode)
+#
+# The result is still clamped to the model hard limits, still subject to the
+# admin toggle, and still subject to the engagement's posture and allowlist.
+# -----------------------------------------------------------------------------
+composition:
+  enabled: true
+  # A composed mode is a first-class mode, not an escape hatch. It widens the set
+  # of permitted capabilities and nothing else: every rule below is enforced in
+  # CapabilityRegistry.compose() and is why composing can never raise a ceiling.
+  max_modes: 3
+  rules:
+    capabilities: "base ∪ add − remove; mandatory capabilities are always re-added"
+    ceiling: "narrowest wins (min of max_hosts / max_actions / max_seconds / concurrent_missions)"
+    mandatory: "union of every part; an obligation cannot be composed away"
+    expansion_clauses: "intersection of every part; composition cannot manufacture a widening clause"
+    still_clamped_by: "model hard limits, admin mode toggle, posture, signed scope and allowlist"
+  allowed:
+    - id: "vuln_plus_tls"
+      label: "Vulnerability Discovery + SSL/TLS Deep Analysis"
+      base: "vulnerability_discovery"
+      add: ["ssl_tls_analysis"]
+      remove: []
+    - id: "bug_bounty_plus_tls"
+      label: "Bug Bounty + SSL/TLS Deep Analysis"
+      base: "bug_bounty"
+      add: ["ssl_tls_analysis"]
+      remove: []
+    - id: "pentest_plus_tls"
+      label: "Full Pentest + SSL/TLS Deep Analysis"
+      base: "pentest"
+      add: ["ssl_tls_analysis"]
+      remove: []
+    - id: "assessment_plus_tls"
+      label: "Security Assessment + SSL/TLS Deep Analysis"
+      base: "assessment"
+      add: ["ssl_tls_analysis"]
+      remove: []
+    - id: "pentest_plus_bounty_reporting"
+      label: "Full Pentest with bug-bounty reporting"
+      base: "pentest"
+      add: ["bug_bounty"]
+      remove: []
+    - id: "discovery_plus_assessment"
+      label: "Vulnerability Discovery with assessment review"
+      base: "vulnerability_discovery"
+      add: ["assessment"]
+      remove: []
+
+# -----------------------------------------------------------------------------
+# Evidence gate: seven questions every confirmed finding must answer.
+# -----------------------------------------------------------------------------
+evidence_gate:
+  enabled: true
+  min_confidence_for_candidate: 0.4
+  require_dual_verification: false
+  questions:
+    - id: "reproducible_evidence"
+      prompt: "Is there stored, hashed evidence produced by an executed check?"
+    - id: "in_scope"
+      prompt: "Was the asset inside the engagement's signed scope at check time?"
+    - id: "security_impact"
+      prompt: "Does the observation describe a security-relevant defect, not a style issue?"
+    - id: "not_by_design"
+      prompt: "Has the known-by-design / operator memory check been applied?"
+    - id: "independent_validation"
+      prompt: "Was the observation produced by a deterministic check rather than model text?"
+    - id: "adversarial_review"
+      prompt: "Did the devil's-advocate role fail to disprove the claim?"
+    - id: "actionable_remediation"
+      prompt: "Is there a concrete, testable remediation?"

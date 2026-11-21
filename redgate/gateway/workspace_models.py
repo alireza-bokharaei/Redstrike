@@ -62,13 +62,39 @@ class MissionCreateRequest(StrictModel):
     skill_id: str = Field(default="web-surface-audit", min_length=3, max_length=64)
     http: HTTPSettings = Field(default_factory=HTTPSettings)
     capture_evidence: bool = True
-    max_actions: int = Field(default=24, ge=1, le=64)
-    max_seconds: int = Field(default=300, ge=10, le=1800)
+    max_actions: int = Field(default=24, ge=1, le=128)
+    max_seconds: int = Field(default=300, ge=10, le=3600)
+    mode_id: str | None = Field(
+        default=None,
+        max_length=160,
+        pattern=r"^[a-z][a-z0-9_]*(\+[a-z][a-z0-9_]*)*$",
+        description=(
+            "Optional operational mode. Accepts a single id (``pentest``) or a composed "
+            "spec (``pentest+ssl_tls_analysis``). When set, the mission ceiling, mandatory "
+            "capabilities and TLS obligation come from config/capabilities.yaml. Omitted "
+            "missions keep the legacy 2.1 bounds."
+        ),
+    )
 
     @field_validator("name", "goal", mode="before")
     @classmethod
     def trim_description(cls, value: object) -> object:
         return value.strip() if isinstance(value, str) else value
+
+    @model_validator(mode="after")
+    def legacy_bounds_without_mode(self) -> "MissionCreateRequest":
+        """Keep the 2.1 bounds unless a 2.2 mode explicitly widens the ceiling.
+
+        The mode ceiling itself is enforced by ``CapabilityRegistry.enforce_ceiling``
+        against ``config/capabilities.yaml``; this validator only stops a client
+        from asking for 2.2-sized budgets while declaring no mode at all.
+        """
+        if self.mode_id is None:
+            if self.max_actions > 64:
+                raise ValueError("max_actions above 64 requires a declared mode_id.")
+            if self.max_seconds > 1800:
+                raise ValueError("max_seconds above 1800 requires a declared mode_id.")
+        return self
 
 
 class MissionControlRequest(StrictModel):

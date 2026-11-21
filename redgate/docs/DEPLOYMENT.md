@@ -1,4 +1,4 @@
-# Deployment, Upgrade and Operations — 2.1.0
+# Deployment, Upgrade and Operations — 2.3.1
 
 ## 1. Prerequisites and trust boundary
 
@@ -36,7 +36,7 @@ Open `http://127.0.0.1:8000`; use **Token** to authenticate. Compose forces `RED
 ```bash
 ./scripts/redgate.sh up --lite
 # Standalone build target, not REDGATE_IMAGE_FLAVOR=evidence:
-docker build --target evidence -f sandbox_runner/Dockerfile -t redgate/runner:2.1.0-evidence .
+docker build --target evidence -f sandbox_runner/Dockerfile -t redgate/runner:2.3.1-evidence .
 ```
 
 `lite` does not disable policy checks to make unsupported languages pass. Go dual-verification skills may have failed/unavailable adapter steps. Check `/api/v1/health` validator booleans and `sandbox_runner.languages`; readiness alone does not establish complete skill/tool support. First-use Go compilation has finite time/memory and may fail closed on a cold/restricted host. Plan capacity based on measurements, not an assumed speedup.
@@ -44,6 +44,10 @@ docker build --target evidence -f sandbox_runner/Dockerfile -t redgate/runner:2.
 ## 3. Scope, policy and mission operation
 
 1. Replace samples in `config/allowlist.yaml` with authorized engagement IDs, UTC RoE dates and exact IP/CIDR/domain rules. Assign matching engagement IDs to identities in `config/operators.yaml`.
+1a. **Decide the 2.3 posture per engagement.** `config/policies.yaml` declares three postures; the default is `posture:permissive_in_scope` (permissive inside the signed scope, operator acknowledgement, two-person approval reserved for four high-impact actions). Bind a different posture per engagement with `POST /api/v1/offensive/posture` (approver/admin only) or accept the default. Postures narrow; none of them widens the allowlist, the RoE window, DNS pinning or the cloud-metadata block.
+1b. **Review the tool flag policy.** Each `tools:` row carries `allowed_flags`/`refused_flags`. `BASELINE_REFUSED_FLAGS` in `mcp_server/catalog.py` is a code-level floor that config cannot lift (e.g. `sqlmap --os-shell`). Moving a flag between allowed and refused is a deliberate review, not a tuning knob. Only the binaries actually installed in your image can run; `GET /api/v1/offensive/tools` reports the installed subset.
+1c. **Mount the artifact root for binary tooling.** `readelf`, `objdump`, `strings` and `nm` take an *artifact name* inside `REDGATE_ARTIFACT_DIR` (gateway default `data/artifacts`; the mcp-server service must see the same directory). Without it those tools refuse rather than resolving against the process cwd, and a path separator in the target is rejected before execution.
+1d. **Optional layers are opt-in by installation.** Install `pwntools` in the gateway/mcp image to enable the binary layer; without it the layer reports `status: unavailable` and journals that fact. Export `HACKERONE_API_USERNAME`/`HACKERONE_API_TOKEN` (or the Bugcrowd/Intigriti/YesWeHack equivalents) only if you want scope sync; otherwise hand-entered scopes stay `source: manual`.
 2. Review `tool_policy.yaml`/`script_policy.yaml`. Mission HTTP ports must be in `http_headers.allowed_params.allowed_ports`; approval-gated tools are not made autonomous.
 3. Keep YAML baselines synchronized with approved runtime changes: startup seeds engagements, tool/script policies and built-in Skills. A restart can overwrite corresponding API edits. Removing a target from YAML is **not a deletion API**; explicitly deactivate obsolete records and verify effective scope.
 4. Create a mission in the console, inspect its finite budget and endpoint, then **Start** explicitly. Pause drains the current intent; cancel gates later actions. A gateway restart pauses interrupted work and requires explicit resume. Pausing does not reset the deadline or return spent reservations.
@@ -98,7 +102,9 @@ Rotation prompts without echo, writes a restricted temporary file, then atomical
 
    The helper uses SQLite's backup API (WAL-aware), checks `quick_check`, writes gzip/0600 and refuses overwrites. Do **not** copy a live `.db` alone or discard its WAL. Retain config, skills and secrets separately under appropriate access control.
 3. Stop/recreate the old single gateway with the new image/source and matching configuration. Never use `docker compose down --volumes` during an upgrade.
-4. First startup applies additive `gateway/migrations/002_workspace.sql` under a transaction. `schema_migrations` records the filename/digest; subsequent boots verify it and do not reapply it. Existing runs, findings and audit records are preserved. No automatic old-run inventory backfill or ARTEX database import occurs.
+4. First startup applies the additive migrations under a transaction: `002_workspace.sql`, `003_capability_modes.sql`, `004_offensive_surface.sql` (policies, postures, consent, exploitation evidence, chains, bounty, pwntools jobs, scan authorisations) and `005_agent_brain.sql` (hunt loops, append-only brain). `schema_migrations` records each filename/digest; subsequent boots verify them and do not reapply. Existing runs, findings and audit records are preserved; no 2.1/2.2 table is altered. No automatic old-run inventory backfill or ARTEX database import occurs.
+4a. After upgrade, the 2.3 control model is present but **inactive for high-impact work** until an approver grants approver-level consent for the relevant policy. That is intentional: an upgraded deployment must not inherit standing permission for exploitation. Verify with `GET /api/v1/offensive/policy` and `GET /api/v1/offensive/brief`.
+
 5. Check `/healthz` (cheap liveness), `/readyz` (MCP/runner readiness), `/api/v1/health` (tool availability), then authenticated `/api/v1/audit/verify`. Verify preserved records, a disposable local mission/evidence/retest, cross-engagement denial, external egress denial and a backup/restore rehearsal before live work.
 
 Do not edit an already-applied migration. Digest drift deliberately prevents startup. Diagnose deployment/source mismatch; do not delete the ledger merely to bypass it.

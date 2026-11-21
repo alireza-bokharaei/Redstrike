@@ -19,7 +19,12 @@ import yaml
 
 from mcp_server import __version__
 from mcp_server.executor import MCPToolExecutor
-from mcp_server.tools import MCP_TOOL_CATALOG, ToolParamValidationError
+from mcp_server.catalog import catalog_size
+from mcp_server.tools import (
+    CATALOG_TOOL_INPUT_SCHEMA,
+    MCP_TOOL_CATALOG,
+    ToolParamValidationError,
+)
 
 MCP_PROTOCOL_VERSION = "2024-11-05"
 executor = MCPToolExecutor()
@@ -78,6 +83,16 @@ def list_exposed_tools() -> list[dict[str, Any]]:
                     "inputSchema": tool.input_schema,
                 }
             )
+    tools.append(
+        {
+            "name": "redstrike_tool",
+            "description": (
+                f"Run any of the {catalog_size()} catalogued offensive tools. Flags must appear "
+                "in the engagement's policy row; argv is built as an argument vector."
+            ),
+            "inputSchema": CATALOG_TOOL_INPUT_SCHEMA,
+        }
+    )
     tools.append(
         {
             "name": "list_recon_skills",

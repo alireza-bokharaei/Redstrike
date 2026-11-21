@@ -20,16 +20,17 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 # Python/Bash validation, missions, MCP checks, graphs, Go HTTP evidence and
 # retests work here. Go/JS script validation fails closed when tools are absent.
 FROM python:3.12-slim-bookworm AS lite
-ARG REDGATE_VERSION=2.1.0
+ARG REDGATE_VERSION=2.3.0
 LABEL org.opencontainers.image.title="Redstrike Gateway" \
       org.opencontainers.image.version="${REDGATE_VERSION}"
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 \
-    REDGATE_SKILLS_DIR=/app/skills REDGATE_DEMO_MODE=false
+    REDGATE_SKILLS_DIR=/app/skills REDGATE_DEMO_MODE=false \
+    REDGATE_ARTIFACT_DIR=/app/data/artifacts
 RUN apt-get update && apt-get install -y --no-install-recommends bash shellcheck ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd -g 10000 redgate \
     && useradd -u 10000 -g redgate -d /tmp -s /usr/sbin/nologin redgate \
-    && mkdir -p /app/data /tmp/sandbox && chown -R redgate:redgate /app/data /tmp/sandbox
+    && mkdir -p /app/data/artifacts /tmp/sandbox && chown -R redgate:redgate /app/data /tmp/sandbox
 COPY --from=python-deps /install /usr/local
 WORKDIR /app
 COPY gateway /app/gateway

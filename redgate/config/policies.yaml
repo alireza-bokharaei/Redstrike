@@ -1,0 +1,261 @@
+# =============================================================================
+# Redstrike 2.3 — Declarative Offensive Policy
+#
+# The prompt's control model, expressed as data:
+#
+#   "Default posture is permissive within declared engagement scope. Strict
+#    two-person approval is required ONLY for high-impact actions."
+#
+# Every row below is a policy the Gateway evaluates. `consent_required` says who
+# must explicitly acknowledge the policy before it applies; `two_person` says the
+# action additionally needs a second human. Nothing here removes the engagement's
+# signed RoE window, its allowlist, or the DNS/metadata guard — those are scope,
+# not posture, and scope is always enforced.
+#
+# This file is seeded into the `policies` table and can then be changed at
+# runtime by an admin (audited). Editing this file does not retroactively grant
+# consent: consent hashes cover the exact declaration text.
+# =============================================================================
+
+version: "2.3"
+
+postures:
+  # The default posture for an engagement that has not been narrowed.
+  - policy_id: "posture:permissive_in_scope"
+    name: "Permissive within declared scope"
+    enabled: true
+    consent_required: "operator"
+    risk_level: "medium"
+    two_person: false
+    declaration: >
+      I confirm this engagement is authorised by the asset owner, that the
+      allowlist reflects the signed scope, and that read-only and non-destructive
+      active checks may run against in-scope assets without asking me again.
+
+  # Narrowing posture: every action that is not strictly read-only is gated.
+  - policy_id: "posture:strict_readonly"
+    name: "Strict read-only (opt-in narrowing)"
+    enabled: true
+    consent_required: "operator"
+    risk_level: "low"
+    two_person: false
+    declaration: >
+      I want this engagement restricted to read-only checks. Every active or
+      state-changing action must be individually approved.
+
+  # CTF posture: aggressive techniques are expected and permitted on the
+  # challenge host set only.
+  - policy_id: "posture:ctf_aggressive"
+    name: "CTF aggressive (challenge hosts only)"
+    enabled: true
+    consent_required: "operator"
+    risk_level: "high"
+    two_person: false
+    declaration: >
+      This is a CTF/challenge environment I am entitled to attack. Aggressive
+      tooling, exploit development and binary interaction against the challenge
+      targets are explicitly permitted. The allowlist is the only boundary.
+
+# -----------------------------------------------------------------------------
+# High-impact policies. These are the ONLY categories that require two people.
+# -----------------------------------------------------------------------------
+high_impact:
+  - policy_id: "exploitation:proof_of_concept"
+    name: "Destructive / state-changing exploitation"
+    enabled: true
+    consent_required: "approver"
+    risk_level: "critical"
+    two_person: true
+    declaration: >
+      I authorise execution of this proof of concept against the named in-scope
+      target. I have verified it cannot cause data loss or service interruption
+      beyond what the RoE permits, and I accept accountability for its execution.
+    bounds:
+      modes: ["pentest", "ctf", "bug_bounty", "vulnerability_discovery"]
+      max_targets_per_request: 1
+      require_validated_poc: true
+      require_reproduction_steps: true
+      allow_destructive_payload: false
+
+  - policy_id: "credential:post_exploitation"
+    name: "Credential dumping / post-exploitation"
+    enabled: true
+    consent_required: "approver"
+    risk_level: "critical"
+    two_person: true
+    declaration: >
+      I authorise handling of credential material obtained during this
+      engagement. I will store it only in the engagement vault, rotate test
+      accounts afterwards, and never reuse it outside this authorisation.
+    bounds:
+      modes: ["pentest", "ctf"]
+      max_targets_per_request: 1
+      storage: "engagement_vault_only"
+      prohibited: ["third_party_accounts", "personal_credentials", "production_secrets"]
+
+  - policy_id: "mass_scan:expanded_budget"
+    name: "Mass scanning outside the default budget"
+    enabled: true
+    consent_required: "approver"
+    risk_level: "high"
+    two_person: true
+    declaration: >
+      I authorise a scan budget larger than the mission default. I understand
+      the volume, the IDS/SOC noise it will generate, and that the authorisation
+      expires.
+    bounds:
+      max_hosts: 4096
+      max_requests: 1000000
+      ttl_seconds: 7200
+      rate_limit_per_second: 50
+      # A mass-scan authorisation never widens the allowlist by itself.
+      scope_widening: false
+
+# -----------------------------------------------------------------------------
+# Tool surface exposed by the execution layer.
+# -----------------------------------------------------------------------------
+tools:
+  # --- read-only, no approval, available in every mode -----------------------
+  - {policy_id: "tool:http_headers", name: "HTTP header inspection", risk_level: "low", consent_required: "none", two_person: false, enabled: true}
+  - {policy_id: "tool:dns_lookup", name: "DNS record lookup", risk_level: "low", consent_required: "none", two_person: false, enabled: true}
+  - {policy_id: "tool:tls_inspect", name: "TLS handshake inspection", risk_level: "low", consent_required: "none", two_person: false, enabled: true}
+  - {policy_id: "tool:tcp_port_probe", name: "TCP connect probe", risk_level: "low", consent_required: "none", two_person: false, enabled: true}
+
+  # --- active but bounded ----------------------------------------------------
+  - policy_id: "tool:nmap"
+    name: "Nmap service detection"
+    risk_level: "medium"
+    consent_required: "none"
+    two_person: false
+    enabled: true
+    bounds:
+      allowed_timings: ["-T1", "-T2"]
+      forbidden_flags: ["--script", "--script-args", "-iR", "-D", "--interactive"]
+
+  - policy_id: "tool:nmap_aggressive"
+    name: "Nmap aggressive timing (-T3/-T4)"
+    risk_level: "high"
+    consent_required: "operator"
+    two_person: false
+    enabled: true
+    bounds:
+      allowed_timings: ["-T1", "-T2", "-T3", "-T4"]
+      # NSE scripts stay refused unless the exploitation policy is also granted.
+      forbidden_flags: ["--script", "--script-args", "-iR", "-D", "--interactive", "--resume"]
+
+  - policy_id: "tool:nikto"
+    name: "Nikto web server scanner"
+    risk_level: "medium"
+    consent_required: "none"
+    two_person: false
+    enabled: true
+    bounds: {allowed_flags: ["-nointeractive", "-ask", "-ssl", "-port"], max_timeout: 300}
+
+  - policy_id: "tool:nuclei"
+    name: "Nuclei template scanner"
+    risk_level: "medium"
+    consent_required: "none"
+    two_person: false
+    enabled: true
+    bounds:
+      allowed_flags: ["-silent", "-json", "-no-interactsh", "-severity"]
+      # Interactsh and headless fuzzing are network-egress amplifying.
+      forbidden_flags: ["-interactsh-url", "-headless", "-fuzz"]
+
+  - policy_id: "tool:gobuster"
+    name: "Content discovery"
+    risk_level: "medium"
+    consent_required: "none"
+    two_person: false
+    enabled: true
+    bounds: {allowed_flags: ["dir", "-q", "-t", "-w"], max_threads: 20}
+
+  - policy_id: "tool:ffuf"
+    name: "Web fuzzing"
+    risk_level: "medium"
+    consent_required: "operator"
+    two_person: false
+    enabled: true
+    bounds: {allowed_flags: ["-s", "-json", "-mc", "-w"], max_rate: 50}
+
+  # --- high impact -----------------------------------------------------------
+  - policy_id: "tool:sqlmap"
+    name: "SQL injection verification"
+    risk_level: "critical"
+    consent_required: "operator"
+    two_person: false
+    enabled: true
+    bounds:
+      allowed_flags: ["--batch", "--level=1", "--level=2", "--risk=1", "--risk=2", "--technique"]
+      # OS interaction and file system flags remain refused in 2.3. This is a
+      # deliberate product decision documented in docs/OFFENSIVE_SURFACE.md:
+      # they are not needed to prove an injection and they turn a finding into a
+      # compromise event.
+      refused_flags: ["--os-shell", "--os-pwn", "--os-cmd", "--os-smbrelay", "--file-write", "--file-read", "--priv-esc"]
+
+  - policy_id: "tool:hydra"
+    name: "Online authentication testing"
+    risk_level: "critical"
+    consent_required: "approver"
+    two_person: true
+    enabled: true
+    bounds:
+      modes: ["pentest", "ctf"]
+      max_attempts: 500
+      account_lockout_ack_required: true
+      allowed_services: ["ssh", "ftp", "http-get", "https-get"]
+
+  - policy_id: "tool:john"
+    name: "Offline hash auditing"
+    risk_level: "high"
+    consent_required: "operator"
+    two_person: false
+    enabled: true
+    bounds: {allowed_flags: ["--list=formats", "--wordlist", "--format"], max_runtime: 1800}
+
+  # --- binary tooling (artifact-rooted, never network) ------------------------
+  - policy_id: "tool:readelf"
+    name: "ELF header and section inspection"
+    risk_level: "low"
+    consent_required: "none"
+    two_person: false
+    enabled: true
+    bounds: {allowed_flags: ["-h", "-S", "-d", "-l", "-s", "-W"], artifact_only: true}
+
+  - policy_id: "tool:objdump"
+    name: "Disassembly and section dump"
+    risk_level: "low"
+    consent_required: "none"
+    two_person: false
+    enabled: true
+    bounds: {allowed_flags: ["-d", "-h", "-x", "-s", "-t"], artifact_only: true}
+
+  - policy_id: "tool:strings"
+    name: "Printable strings extraction"
+    risk_level: "low"
+    consent_required: "none"
+    two_person: false
+    enabled: true
+    bounds: {allowed_flags: ["-a", "-n"], artifact_only: true}
+
+  - policy_id: "tool:nm"
+    name: "Symbol table inspection"
+    risk_level: "low"
+    consent_required: "none"
+    two_person: false
+    enabled: true
+    bounds: {allowed_flags: ["-D", "-C", "-a"], artifact_only: true}
+
+  # --- pwntools --------------------------------------------------------------
+  - policy_id: "tool:pwntools"
+    name: "pwntools binary/exploit development toolkit"
+    risk_level: "high"
+    consent_required: "operator"
+    two_person: false
+    enabled: true
+    bounds:
+      modes: ["ctf", "pentest", "vulnerability_discovery"]
+      actions: ["elf_analyze", "checksec", "rop_search", "asm", "disasm", "cyclic", "shellcode", "run_script"]
+      require_pip_install: true
+      sandbox_required: true
+      max_runtime_sec: 120

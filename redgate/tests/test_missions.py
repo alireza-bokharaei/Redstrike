@@ -349,7 +349,7 @@ async def test_health_versions_and_private_static_assets(ws):
     from pathlib import Path
 
     version = (Path(__file__).parents[1] / "VERSION").read_text().strip()
-    assert version == __version__ == mcp_version == "2.1.0"
+    assert version == __version__ == mcp_version == "2.3.1"
     assert (await ws.client.get("/healthz")).json()["version"] == version
     assert (await ws.client.get("/readyz")).status_code == 200
     assert (await ws.client.get("/api/v1/demo/bootstrap")).status_code == 404

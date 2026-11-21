@@ -125,7 +125,7 @@ if pending:
     raise SystemExit('ERROR: Internal services did not become healthy: ' + ','.join(sorted(pending)))
 PY
 kill -0 "$SB_PID" "$MCP_PID"
-printf '[ready] Redstrike 2.1.0 at http://%s:%s (development mode, no host isolation guarantee)\n' "$REDGATE_GATEWAY_HOST" "$REDGATE_GATEWAY_PORT"
+printf '[ready] Redstrike 2.3.1 at http://%s:%s (development mode, no host isolation guarantee)\n' "$REDGATE_GATEWAY_HOST" "$REDGATE_GATEWAY_PORT"
 "$PYTHON_BIN" -m uvicorn gateway.main:app --host "$REDGATE_GATEWAY_HOST" --port "$REDGATE_GATEWAY_PORT" --workers 1 --log-level info &
 GW_PID=$!
 # If any layer exits unexpectedly, clean up the other two instead of orphaning them.

@@ -1,0 +1,33 @@
+# Triage & Validation
+#
+# Provenance: written for this repository. The referenced upstream catalogue
+# (alireza-bokharaei/pentest-agents) carries no licence, so no markdown, prompt or
+# data file from it is copied here. What is shared is the *workflow shape*: a named
+# hypothesis, a bounded set of observable checks, and a stated refutation.
+#
+# Scope: every step below is one of the autonomous, in-tree tools
+# (tcp_port_probe, http_headers, tls_inspect). Nothing here can call nmap, sqlmap or any approval-gated tool,
+# expand scope, raise a budget or confirm a finding.
+
+id: triage-validation
+name: Triage & Validation
+version: '1.0'
+category: validation
+description: Decide between candidate, confirmed and rejected using stored evidence only.
+max_steps: 2
+expand_wildcard_subdomains: false
+steps:
+- stage: header_posture
+  tool: http_headers
+  params:
+    method: GET
+  rationale: Re-read the live response instead of trusting a note.
+- stage: transport
+  tool: tls_inspect
+  params:
+    port: 443
+  rationale: Re-confirm the transport facts the finding depends on.
+prioritization_rules:
+  missing_hsts_severity: medium
+report_focus: 'Refute any finding whose reproduction needs a fact that is not stored: a remembered screenshot
+  is not evidence. Downgrade to candidate until a second operator reproduces it.'

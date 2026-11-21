@@ -1,0 +1,44 @@
+# Intel Ranking Round
+#
+# Provenance: written for this repository. The referenced upstream catalogue
+# (alireza-bokharaei/pentest-agents) carries no licence, so no markdown, prompt or
+# data file from it is copied here. What is shared is the *workflow shape*: a named
+# hypothesis, a bounded set of observable checks, and a stated refutation.
+#
+# Scope: every step below is one of the autonomous, in-tree tools
+# (tcp_port_probe, http_headers, tls_inspect). Nothing here can call nmap, sqlmap or any approval-gated tool,
+# expand scope, raise a budget or confirm a finding.
+
+id: intel-ranking
+name: Intel Ranking Round
+version: '1.0'
+category: discovery
+description: Rank vulnerability classes from stated signals, program ROI and recorded outcomes, then budget
+  the next hour.
+max_steps: 3
+expand_wildcard_subdomains: false
+steps:
+- stage: port_reachability
+  tool: tcp_port_probe
+  params:
+    ports:
+    - 80
+    - 443
+    - 8080
+    - 8443
+  rationale: Confirm the surface the ranking is about.
+- stage: header_posture
+  tool: http_headers
+  params:
+    method: GET
+  rationale: Collect the live signals the ranking consumes.
+- stage: transport
+  tool: tls_inspect
+  params:
+    port: 443
+  rationale: TLS posture is itself a ranked class; measure it rather than assuming.
+prioritization_rules:
+  missing_hsts_severity: medium
+  legacy_tls_severity: high
+report_focus: Refute a top-ranked class when the signal it relied on is absent on re-check. The ranking
+  is a hypothesis, not a finding; say which weight produced the position.

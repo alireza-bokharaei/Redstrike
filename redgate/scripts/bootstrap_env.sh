@@ -42,7 +42,7 @@ trap 'rm -f -- "$TMP_ENV"' EXIT
 cat > "$TMP_ENV" <<EOF
 # Generated on $(date -u +%Y-%m-%dT%H:%M:%SZ). Never commit this file.
 REDGATE_BIND_ADDR=127.0.0.1
-REDGATE_VERSION=2.1.0
+REDGATE_VERSION=2.3.1
 REDGATE_IMAGE_FLAVOR=full
 REDGATE_SECRETS_GID=${SECRETS_GID}
 REDGATE_INTERNAL_TOKEN=${INTERNAL_TOKEN}
@@ -61,7 +61,7 @@ else ln -- "$TMP_ENV" "$ENV_FILE"; rm -f -- "$TMP_ENV"; fi
 trap - EXIT
 cat <<EOF
 =====================================================================
- Redstrike 2.1.0 initialized. SAVE THESE PRIVATE BEARER TOKENS NOW.
+ Redstrike 2.3.1 initialized. SAVE THESE PRIVATE BEARER TOKENS NOW.
  Only their SHA-256 hashes are stored in .env (0600).
 =====================================================================
   op-alice    (operator) : ${TOK_ALICE}

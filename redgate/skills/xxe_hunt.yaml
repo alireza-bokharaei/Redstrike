@@ -1,0 +1,37 @@
+# XXE Hunting Playbook
+#
+# Provenance: written for this repository. The referenced upstream catalogue
+# (alireza-bokharaei/pentest-agents) carries no licence, so no markdown, prompt or
+# data file from it is copied here. What is shared is the *workflow shape*: a named
+# hypothesis, a bounded set of observable checks, and a stated refutation.
+#
+# Scope: every step below is one of the autonomous, in-tree tools
+# (tcp_port_probe, http_headers, tls_inspect). Nothing here can call nmap, sqlmap or any approval-gated tool,
+# expand scope, raise a budget or confirm a finding.
+
+id: xxe-hunt
+name: XXE Hunting Playbook
+version: '1.0'
+category: web_hunting
+description: External entity resolution proven out-of-band, never with an inline read.
+max_steps: 2
+expand_wildcard_subdomains: false
+steps:
+- stage: port_reachability
+  tool: tcp_port_probe
+  params:
+    ports:
+    - 80
+    - 443
+    - 8080
+    - 8443
+  rationale: Confirm the XML-consuming endpoint.
+- stage: header_posture
+  tool: http_headers
+  params:
+    method: GET
+  rationale: Check the accepted content type and parser error style.
+prioritization_rules:
+  missing_hsts_severity: low
+report_focus: Refute when the parser rejects the DOCTYPE or never performs the entity fetch, and no OOB
+  interaction is logged.
